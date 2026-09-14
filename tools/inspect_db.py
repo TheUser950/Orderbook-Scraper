@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Datenqualitaets-Report ueber die gesammelten Snapshots.
+"""Data quality report over the collected snapshots.
 
     python tools/inspect_db.py [--db data/orderbook.db] [--run latest]
 
-Zeigt je Boerse: Zeilenzahl, Raster-Luecken, Frische (age_ms), Spread,
-Anteil stale/crossed/partial-Flags sowie Reconnect-Zaehler. Das ist der
-eigentliche Abnahmetest: er zeigt nicht nur *dass* Daten fliessen, sondern
-ob sie fuer Forschung brauchbar sind.
+Shows per exchange: row count, gaps in the grid, freshness (age_ms), spread,
+share of stale/crossed/partial flags and the connection count. This is the
+real acceptance test: it shows not just *that* data is flowing, but whether it
+is usable for research.
 """
 
 from __future__ import annotations
@@ -40,12 +40,12 @@ def mid_spread(bids_json: str, asks_json: str) -> tuple[float, float] | None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default="data/orderbook.db")
-    parser.add_argument("--run", default="latest", help="'latest' oder eine run_id")
+    parser.add_argument("--run", default="latest", help="'latest' or a run_id")
     args = parser.parse_args()
 
     db_path = Path(args.db)
     if not db_path.is_file():
-        print(f"Keine Datenbank gefunden unter {db_path}")
+        print(f"No database found at {db_path}")
         return 1
 
     conn = sqlite3.connect(str(db_path))
@@ -54,14 +54,14 @@ def main() -> int:
     if args.run == "latest":
         row = conn.execute("SELECT id FROM runs ORDER BY id DESC LIMIT 1").fetchone()
         if row is None:
-            print("Keine Laeufe in der Datenbank.")
+            print("No runs in the database.")
             return 1
         run_id = row["id"]
     else:
         run_id = int(args.run)
 
     run = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-    print(f"Run #{run_id}  gestartet={run['started_at']}  gestoppt={run['stopped_at']}")
+    print(f"Run #{run_id}  started={run['started_at']}  stopped={run['stopped_at']}")
 
     exchanges = [
         r["exchange"]
@@ -71,33 +71,41 @@ def main() -> int:
         )
     ]
     if not exchanges:
-        print("Keine Snapshots fuer diesen Lauf.")
+        print("No snapshots for this run.")
         return 0
 
     header = (
-        f"{'Boerse':10s} {'Zeilen':>7s} {'Luecken':>8s} {'age_ms avg/max':>16s} "
-        f"{'Spread(bps)':>12s} {'stale%':>7s} {'crossed%':>9s} {'partial%':>9s} {'connects':>9s}"
+        f"{'Exchange':10s} {'Rows':>7s} {'Gaps':>8s} {'age_ms avg/max':>16s} "
+        f"{'Spread(bps)':>12s} {'stale%':>7s} {'crossed%':>9s} {'partial%':>9s} "
+        f"{'connects':>9s}"
     )
     print("\n" + header)
     print("-" * len(header))
 
     for exchange in exchanges:
         rows = conn.execute(
-            "SELECT ts_grid, age_ms, bids, asks, flags FROM snapshots "
-            "WHERE run_id = ? AND exchange = ? ORDER BY ts_grid",
+            "SELECT symbol, ts_grid, age_ms, bids, asks, flags FROM snapshots "
+            "WHERE run_id = ? AND exchange = ? ORDER BY symbol, ts_grid",
             (run_id, exchange),
         ).fetchall()
         n = len(rows)
         if n == 0:
             continue
 
-        grids = [r["ts_grid"] for r in rows]
-        if n > 1:
+        # Gaps have to be counted per symbol: with several symbols the grid
+        # timestamps repeat across them, so a combined series would make the
+        # typical step 0 and flag every row as a gap.
+        gaps = 0
+        by_symbol: dict[str, list[int]] = {}
+        for r in rows:
+            by_symbol.setdefault(r["symbol"], []).append(r["ts_grid"])
+        for grids in by_symbol.values():
+            if len(grids) < 2:
+                continue
             steps = [b - a for a, b in zip(grids, grids[1:])]
             typical = statistics.median(steps)
-            gaps = sum(1 for s in steps if s > typical * 1.5)
-        else:
-            gaps = 0
+            if typical > 0:
+                gaps += sum(1 for s in steps if s > typical * 1.5)
 
         ages = [r["age_ms"] for r in rows if r["age_ms"] is not None]
         age_avg = statistics.mean(ages) if ages else float("nan")
@@ -114,8 +122,8 @@ def main() -> int:
         crossed_pct = 100 * sum(1 for r in rows if r["flags"] & FLAG_CROSSED) / n
         partial_pct = 100 * sum(1 for r in rows if r["flags"] & FLAG_PARTIAL) / n
 
-        # Zaehlt jedes erfolgreiche (Wieder-)Verbinden, den allerersten Connect
-        # eingeschlossen - "1" bei einem stoerungsfreien Lauf ist also normal.
+        # Counts every successful (re)connect, including the very first one -
+        # so "1" on an undisturbed run is normal.
         connects = conn.execute(
             "SELECT COUNT(*) c FROM connection_events "
             "WHERE run_id = ? AND exchange = ? AND event = 'connected'",
@@ -136,7 +144,7 @@ def main() -> int:
     ).fetchall()
     if skipped:
         print(
-            "\nUebersprungen (Symbol nicht gelistet): "
+            "\nSkipped (symbol not listed): "
             + ", ".join(r["exchange"] for r in skipped)
         )
 

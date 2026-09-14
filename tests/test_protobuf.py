@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Tests fuer den Protobuf-Wire-Format-Leser und das MEXC-Parsing.
+"""Tests for the protobuf wire-format reader and the MEXC parsing.
 
-Laeuft ohne Test-Framework:  python tests\\test_protobuf.py
+Runs without a test framework:  python tests/test_protobuf.py
 
-Handgerollte Wire-Format-Dekodierung ist leicht subtil falsch zu bekommen,
-deshalb wird hier gegen selbst kodierte Frames geprueft - inklusive der
-Faelle, die im Betrieb wirklich zaehlen: unbekannte Felder (additive
-Schema-Aenderung) und abgeschnittene Frames.
+Hand-rolled wire-format decoding is easy to get subtly wrong, so this checks
+against self-encoded frames - including the cases that actually matter in
+production: unknown fields (additive schema change) and truncated frames.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         failures.append(name)
 
 
-# -- Minimaler Protobuf-Encoder, nur fuer die Tests -----------------------
+# -- Minimal protobuf encoder, for the tests only -------------------------
 
 
 def varint(value: int) -> bytes:
@@ -81,7 +80,7 @@ def build_mexc_frame(
     version: str = "987654",
     extra_unknown: bytes = b"",
 ) -> bytes:
-    """Baut einen Frame wie ihn MEXC fuer limit.depth sendet."""
+    """Build a frame the way MEXC sends one for limit.depth."""
     bids = bids if bids is not None else [("2500.10", "1.5"), ("2500.00", "3.0")]
     asks = asks if asks is not None else [("2500.20", "2.0"), ("2500.30", "4.0")]
 
@@ -102,29 +101,29 @@ def build_mexc_frame(
 
 
 def test_wire_format() -> None:
-    print("\nWire-Format:")
-    msg = parse_message(field_str(1, "hallo") + field_varint(2, 300))
-    check("String-Feld", get_str(msg, 1) == "hallo", repr(get_str(msg, 1)))
-    check("Varint-Feld (mehrbytig)", get_int(msg, 2) == 300, repr(get_int(msg, 2)))
-    check("Fehlendes Feld -> None", get_str(msg, 99) is None)
+    print("\nWire format:")
+    msg = parse_message(field_str(1, "hello") + field_varint(2, 300))
+    check("string field", get_str(msg, 1) == "hello", repr(get_str(msg, 1)))
+    check("varint field (multi-byte)", get_int(msg, 2) == 300, repr(get_int(msg, 2)))
+    check("missing field -> None", get_str(msg, 99) is None)
 
-    # Wiederholte Felder muessen ihre Reihenfolge behalten - sonst waere die
-    # Level-Sortierung des Orderbooks kaputt.
+    # Repeated fields must keep their order - otherwise the level ordering of
+    # the order book would be broken.
     repeated = b"".join(field_msg(1, level_item(p, "1")) for p in ["3", "2", "1"])
     subs = get_submessages(parse_message(repeated), 1)
     order = [get_str(s, 1) for s in subs]
-    check("Reihenfolge wiederholter Felder", order == ["3", "2", "1"], repr(order))
+    check("order of repeated fields", order == ["3", "2", "1"], repr(order))
 
     for name, data in [
-        ("abgeschnittenes Varint", b"\x08\x80"),
-        ("Laenge ueber Frame-Ende", b"\x0a\xff\x01ab"),
-        ("Feldnummer 0", b"\x00\x01"),
+        ("truncated varint", b"\x08\x80"),
+        ("length past end of frame", b"\x0a\xff\x01ab"),
+        ("field number 0", b"\x00\x01"),
     ]:
         try:
             parse_message(data)
-            check(f"{name} wirft ProtobufError", False, "keine Exception")
+            check(f"{name} raises ProtobufError", False, "no exception")
         except ProtobufError:
-            check(f"{name} wirft ProtobufError", True)
+            check(f"{name} raises ProtobufError", True)
 
 
 def make_adapter(depth: int = 20) -> MexcAdapter:
@@ -133,89 +132,89 @@ def make_adapter(depth: int = 20) -> MexcAdapter:
 
 
 def test_mexc_parse() -> None:
-    print("\nMEXC-Frame:")
+    print("\nMEXC frame:")
     adapter = make_adapter()
     updates = adapter.parse(("pb", build_mexc_frame()))
-    check("genau ein Update", len(updates) == 1, f"{len(updates)}")
+    check("exactly one update", len(updates) == 1, f"{len(updates)}")
     if not updates:
         return
     upd = updates[0]
-    check("Symbol", upd.symbol == "ETHUSDC", upd.symbol)
-    check("Bids", upd.bids == [("2500.10", "1.5"), ("2500.00", "3.0")], str(upd.bids))
-    check("Asks", upd.asks == [("2500.20", "2.0"), ("2500.30", "4.0")], str(upd.asks))
-    check("Exchange-Zeitstempel", upd.ts_exchange == 1700000000123, str(upd.ts_exchange))
-    check("Sequenz aus version", upd.seq == 987654, str(upd.seq))
-    check("ist Snapshot", upd.is_snapshot is True)
+    check("symbol", upd.symbol == "ETHUSDC", upd.symbol)
+    check("bids", upd.bids == [("2500.10", "1.5"), ("2500.00", "3.0")], str(upd.bids))
+    check("asks", upd.asks == [("2500.20", "2.0"), ("2500.30", "4.0")], str(upd.asks))
+    check("exchange timestamp", upd.ts_exchange == 1700000000123, str(upd.ts_exchange))
+    check("sequence from version", upd.seq == 987654, str(upd.seq))
+    check("is a snapshot", upd.is_snapshot is True)
 
-    # Preise muessen exakt als String durchgereicht werden - eine
-    # Float-Konvertierung waere auf dem Schreibpfad verlustbehaftet.
+    # Prices must be passed through exactly as strings - a float conversion
+    # would be lossy on the write path.
     exact = build_mexc_frame(bids=[("0.000000012345678", "9999999.123456789")])
     upd2 = adapter.parse(("pb", exact))[0]
     check(
-        "Preis-String unveraendert",
+        "price string unchanged",
         upd2.bids[0] == ("0.000000012345678", "9999999.123456789"),
         str(upd2.bids[0]),
     )
 
 
 def test_schema_change_tolerance() -> None:
-    """Der eigentliche Punkt: additive Schema-Aenderungen duerfen nicht stoeren."""
-    print("\nToleranz gegenueber Schema-Aenderungen:")
+    """The actual point: additive schema changes must not disturb anything."""
+    print("\nTolerance towards schema changes:")
     adapter = make_adapter()
 
     unknown = (
-        field_str(42, "ein neues Feld")
+        field_str(42, "a new field")
         + field_varint(43, 12345)
-        + field_msg(44, field_str(1, "verschachtelt neu"))
+        + field_msg(44, field_str(1, "nested new"))
     )
     updates = adapter.parse(("pb", build_mexc_frame(extra_unknown=unknown)))
-    check("unbekannte Felder werden uebersprungen", len(updates) == 1, str(len(updates)))
+    check("unknown fields are skipped", len(updates) == 1, str(len(updates)))
     if updates:
         check(
-            "Daten trotz unbekannter Felder korrekt",
+            "data correct despite unknown fields",
             updates[0].bids == [("2500.10", "1.5"), ("2500.00", "3.0")],
             str(updates[0].bids),
         )
 
-    # Kaputte Frames duerfen nur gezaehlt, nicht geworfen werden - sonst
-    # reisst ein einzelnes Frame die ganze Verbindung ab.
+    # Broken frames may only be counted, not raised - otherwise a single frame
+    # would tear down the whole connection.
     before = adapter.protobuf_errors
     result = adapter.parse(("pb", b"\x0a\xff\xff\xff\x7f"))
-    check("kaputtes Frame wirft nicht", result == [], str(result))
-    check("Fehlerzaehler erhoeht", adapter.protobuf_errors == before + 1)
+    check("broken frame does not raise", result == [], str(result))
+    check("error counter incremented", adapter.protobuf_errors == before + 1)
 
-    # Ein Wrapper ohne Depth-Body (anderer Kanal) ist kein Fehler.
+    # A wrapper without a depth body (different channel) is not an error.
     other = field_str(1, "spot@public.deals.v3.api.pb@ETHUSDC") + field_str(3, "ETHUSDC")
     errors_before = adapter.protobuf_errors
-    check("fremder Kanal -> leer", adapter.parse(("pb", other)) == [])
-    check("fremder Kanal ist kein Fehler", adapter.protobuf_errors == errors_before)
+    check("foreign channel -> empty", adapter.parse(("pb", other)) == [])
+    check("foreign channel is not an error", adapter.protobuf_errors == errors_before)
 
 
 def test_depth_truncation() -> None:
-    print("\nTiefen-Begrenzung:")
+    print("\nDepth truncation:")
     adapter = make_adapter(depth=5)
     many = [(f"{2500 - i}", "1.0") for i in range(20)]
     upd = adapter.parse(("pb", build_mexc_frame(bids=many, asks=many)))[0]
-    check("Bids auf effective_depth gekappt", len(upd.bids) == 5, str(len(upd.bids)))
-    check("Asks auf effective_depth gekappt", len(upd.asks) == 5, str(len(upd.asks)))
+    check("bids truncated to effective_depth", len(upd.bids) == 5, str(len(upd.bids)))
+    check("asks truncated to effective_depth", len(upd.asks) == 5, str(len(upd.asks)))
 
 
 def test_control_frames() -> None:
-    print("\nKontrollnachrichten:")
+    print("\nControl messages:")
     adapter = make_adapter()
-    check("JSON-Ack liefert keine Updates", adapter.parse({"id": 0, "code": 0}) == [])
+    check("JSON ack yields no updates", adapter.parse({"id": 0, "code": 0}) == [])
     check(
-        "Server-PING wird beantwortet",
+        "server PING is answered",
         adapter.reactive_reply({"id": 0, "code": 0, "msg": "PING"})
         == {"method": "PONG"},
     )
-    check("normale Nachricht braucht keine Antwort", adapter.reactive_reply({}) is None)
+    check("normal message needs no reply", adapter.reactive_reply({}) is None)
     check(
-        "Binaerframe wird als Protobuf markiert",
+        "binary frame is tagged as protobuf",
         adapter.decode_frame(b"\x08\x01") == ("pb", b"\x08\x01"),
     )
     check(
-        "Textframe wird als JSON gelesen",
+        "text frame is read as JSON",
         adapter.decode_frame('{"code":0}') == {"code": 0},
     )
 
@@ -229,6 +228,6 @@ if __name__ == "__main__":
 
     print()
     if failures:
-        print(f"{len(failures)} Test(s) fehlgeschlagen: {', '.join(failures)}")
+        print(f"{len(failures)} test(s) failed: {', '.join(failures)}")
         raise SystemExit(1)
-    print("Alle Tests bestanden.")
+    print("All tests passed.")

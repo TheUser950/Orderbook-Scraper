@@ -1,4 +1,4 @@
-"""Name -> Adapter-Klasse. run.py und der Dry-Run schauen nur hier hin."""
+"""Name -> adapter class. run.py and the dry run only look here."""
 
 from __future__ import annotations
 
@@ -32,6 +32,6 @@ def create_adapter(name: str, cfg, conn) -> ExchangeAdapter:
     cls = REGISTRY.get(name)
     if cls is None:
         raise ValueError(
-            f"Unbekannte Boerse '{name}'. Bekannt: {', '.join(sorted(REGISTRY))}"
+            f"Unknown exchange '{name}'. Known: {', '.join(sorted(REGISTRY))}"
         )
     return cls(cfg, conn)

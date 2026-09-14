@@ -1,7 +1,7 @@
-"""Gate.io Spot v4.
+"""Gate.io spot v4.
 
-spot.order_book liefert bei jedem Push bereits ein vollstaendiges Top-N -
-keine lokale Buchpflege noetig.
+spot.order_book already delivers a complete top-N on every push - no local
+book maintenance needed.
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ class GateAdapter(ExchangeAdapter):
                 "time": int(time.time()),
                 "channel": "spot.order_book",
                 "event": "subscribe",
-                # Feinstmoegliches Push-Intervall; das eigentliche
-                # Aufzeichnungs-Raster bestimmt der Sampler unabhaengig davon.
+                # Finest available push interval; the actual recording grid is
+                # decided independently by the sampler.
                 "payload": [s.native, str(self.effective_depth), "100ms"],
             }
             for s in self.symbols

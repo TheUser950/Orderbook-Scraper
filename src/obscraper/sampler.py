@@ -1,12 +1,11 @@
-"""Wall-Clock-getakteter Sampler.
+"""Wall-clock paced sampler.
 
-Geplant wird ueber ``time.monotonic()``, nicht ueber ``time.time()``: Die
-Wall-Clock kann durch NTP-Korrekturen oder (gerade in virtualisierten
-Umgebungen) durch Hypervisor-Zeitanpassungen leicht vor- oder zurueckspringen.
-Ein Scheduler, der direkt auf ihr aufbaut, kann dadurch Ticks doppelt feuern
-oder auslassen. Die monotone Uhr ist dagegen immun; sie wird einmalig gegen
-die Wall-Clock verankert, damit ``ts_grid`` weiterhin ein echter, ueber
-Boersen vergleichbarer Unix-Zeitstempel bleibt.
+Scheduling runs on ``time.monotonic()``, not ``time.time()``: the wall clock
+can jump forwards or backwards through NTP corrections or - especially in
+virtualised environments - hypervisor time adjustments. A scheduler built
+directly on it can fire ticks twice or skip them. The monotonic clock is
+immune to that; it is anchored against the wall clock once so ``ts_grid``
+remains a real Unix timestamp that is comparable across exchanges.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ class Sampler:
         origin_wall = time.time()
         origin_mono = time.monotonic()
 
-        # Naechster Tick-Index relativ zum Referenzpunkt.
+        # Index of the next tick, relative to the reference point.
         next_n = math.floor(origin_mono / grid_s) + 1
 
         while not stop.is_set():
@@ -57,9 +56,9 @@ class Sampler:
             self.ticks += 1
 
             next_n += 1
-            # Falls die Schleife (z.B. durch eine lange Blockade) mehrere
-            # Ticks verpasst hat: auf den naechsten anstehenden Tick
-            # vorspulen statt die verpassten nachzufeuern (kein Burst).
+            # If the loop missed several ticks (e.g. because something blocked
+            # for a while), skip ahead to the next upcoming tick instead of
+            # firing the missed ones back to back (no burst).
             min_next = math.floor(time.monotonic() / grid_s) + 1
             if next_n < min_next:
                 next_n = min_next

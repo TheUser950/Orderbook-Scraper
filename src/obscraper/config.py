@@ -1,14 +1,14 @@
-"""Laden und Validieren der config.yaml.
+"""Loading and validating config.yaml.
 
-Fehlerhafte Konfiguration soll beim Start mit einer verstaendlichen Meldung
-abbrechen - nicht drei Stunden spaeter mit einem KeyError im Adapter.
+A bad configuration should abort at startup with a comprehensible message -
+not three hours later with a KeyError deep inside an adapter.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ BACKENDS = ("sqlite",)
 
 
 class ConfigError(Exception):
-    """Wird mit einer fuer Menschen lesbaren Meldung geworfen."""
+    """Raised with a human-readable message."""
 
 
 @dataclass(slots=True)
@@ -51,8 +51,8 @@ class ConnectionConfig:
     relatency_improvement_pct: float = 25.0
     reconnect_backoff_min_s: float = 1.0
     reconnect_backoff_max_s: float = 60.0
-    # Nur fuer transport=auto: nach so vielen WS-Fehlversuchen in Folge wird
-    # voruebergehend auf REST-Polling ausgewichen.
+    # transport=auto only: after this many consecutive WS failures, fall back
+    # to REST polling for a while.
     ws_failures_before_rest: int = 3
     rest_fallback_duration_s: float = 600.0
     stale_after_s: float = 15.0
@@ -64,10 +64,10 @@ class ConnectionConfig:
 
 @dataclass(slots=True)
 class ExchangeConfig:
-    """Aufgeloeste Einstellungen fuer genau eine Boerse.
+    """Resolved settings for exactly one exchange.
 
-    Alle Felder sind bereits mit den general-Werten aufgefuellt, damit die
-    Adapter nie zwei Stellen befragen muessen.
+    All fields are already filled in from the general section so adapters
+    never have to consult two places.
     """
 
     name: str
@@ -93,7 +93,7 @@ class AppConfig:
         return [e for e in self.exchanges.values() if e.enabled]
 
     def fingerprint(self) -> tuple[str, str]:
-        """(json, sha256) - wird pro Lauf in der runs-Tabelle abgelegt."""
+        """(json, sha256) - stored per run in the runs table."""
         payload = json.dumps(
             {
                 "general": asdict(self.general),
@@ -107,12 +107,12 @@ class AppConfig:
 
 
 def _coerce(section: str, raw: dict[str, Any], cls: type) -> Any:
-    known = {f for f in cls.__slots__}
+    known = set(cls.__slots__)
     unknown = set(raw) - known
     if unknown:
         raise ConfigError(
-            f"Unbekannte Schluessel in '{section}': {', '.join(sorted(unknown))}. "
-            f"Erlaubt sind: {', '.join(sorted(known))}"
+            f"Unknown keys in '{section}': {', '.join(sorted(unknown))}. "
+            f"Allowed: {', '.join(sorted(known))}"
         )
     return cls(**raw)
 
@@ -120,20 +120,20 @@ def _coerce(section: str, raw: dict[str, Any], cls: type) -> Any:
 def load_config(path: str | Path) -> AppConfig:
     path = Path(path)
     if not path.is_file():
-        raise ConfigError(f"Konfigurationsdatei nicht gefunden: {path}")
+        raise ConfigError(f"Configuration file not found: {path}")
 
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        raise ConfigError(f"config.yaml ist kein gueltiges YAML: {exc}") from exc
+        raise ConfigError(f"config.yaml is not valid YAML: {exc}") from exc
 
     if not isinstance(raw, dict):
-        raise ConfigError("config.yaml muss auf oberster Ebene ein Mapping sein.")
+        raise ConfigError("config.yaml must be a mapping at the top level.")
 
     unknown_top = set(raw) - {"general", "storage", "connection", "exchanges"}
     if unknown_top:
         raise ConfigError(
-            f"Unbekannte Abschnitte in config.yaml: {', '.join(sorted(unknown_top))}"
+            f"Unknown sections in config.yaml: {', '.join(sorted(unknown_top))}"
         )
 
     general = _coerce("general", raw.get("general") or {}, GeneralConfig)
@@ -146,14 +146,14 @@ def load_config(path: str | Path) -> AppConfig:
 
     exchanges_raw = raw.get("exchanges") or {}
     if not isinstance(exchanges_raw, dict) or not exchanges_raw:
-        raise ConfigError("Abschnitt 'exchanges' fehlt oder ist leer.")
+        raise ConfigError("Section 'exchanges' is missing or empty.")
 
     exchanges: dict[str, ExchangeConfig] = {}
     for name, over in exchanges_raw.items():
         exchanges[name] = _build_exchange(name, over or {}, general)
 
     if not any(e.enabled for e in exchanges.values()):
-        raise ConfigError("Keine einzige Boerse ist aktiviert (enabled: true).")
+        raise ConfigError("Not a single exchange is enabled (enabled: true).")
 
     return AppConfig(general, storage, connection, exchanges, str(path))
 
@@ -173,13 +173,13 @@ def _build_exchange(
     }
     if not isinstance(over, dict):
         raise ConfigError(
-            f"exchanges.{name} muss ein Mapping sein (z.B. '{{ enabled: true }}')."
+            f"exchanges.{name} must be a mapping (e.g. '{{ enabled: true }}')."
         )
     unknown = set(over) - allowed
     if unknown:
         raise ConfigError(
-            f"Unbekannte Schluessel unter exchanges.{name}: "
-            f"{', '.join(sorted(unknown))}. Erlaubt: {', '.join(sorted(allowed))}"
+            f"Unknown keys under exchanges.{name}: {', '.join(sorted(unknown))}. "
+            f"Allowed: {', '.join(sorted(allowed))}"
         )
 
     cfg = ExchangeConfig(
@@ -200,68 +200,68 @@ def _build_exchange(
 
     if cfg.transport not in TRANSPORTS:
         raise ConfigError(
-            f"exchanges.{name}.transport = '{cfg.transport}' ist ungueltig. "
-            f"Erlaubt: {', '.join(TRANSPORTS)}"
+            f"exchanges.{name}.transport = '{cfg.transport}' is invalid. "
+            f"Allowed: {', '.join(TRANSPORTS)}"
         )
     if cfg.depth_policy not in DEPTH_POLICIES:
         raise ConfigError(
-            f"exchanges.{name}.depth_policy = '{cfg.depth_policy}' ist ungueltig. "
-            f"Erlaubt: {', '.join(DEPTH_POLICIES)}"
+            f"exchanges.{name}.depth_policy = '{cfg.depth_policy}' is invalid. "
+            f"Allowed: {', '.join(DEPTH_POLICIES)}"
         )
     if cfg.depth < 1:
-        raise ConfigError(f"exchanges.{name}.depth muss >= 1 sein.")
+        raise ConfigError(f"exchanges.{name}.depth must be >= 1.")
     if not cfg.symbols:
-        raise ConfigError(f"exchanges.{name}: keine Symbole konfiguriert.")
+        raise ConfigError(f"exchanges.{name}: no symbols configured.")
     return cfg
 
 
 def _validate_general(g: GeneralConfig) -> None:
     if not g.symbols:
-        raise ConfigError("general.symbols darf nicht leer sein.")
+        raise ConfigError("general.symbols must not be empty.")
     for sym in g.symbols:
         if "/" not in sym:
             raise ConfigError(
-                f"Symbol '{sym}' muss kanonisch als BASE/QUOTE angegeben werden, "
-                f"z.B. 'ETH/USDC'."
+                f"Symbol '{sym}' must be given in canonical BASE/QUOTE form, "
+                f"e.g. 'ETH/USDC'."
             )
     if g.interval_ms < 50:
-        raise ConfigError("general.interval_ms muss mindestens 50 betragen.")
+        raise ConfigError("general.interval_ms must be at least 50.")
     if g.depth < 1:
-        raise ConfigError("general.depth muss >= 1 sein.")
+        raise ConfigError("general.depth must be >= 1.")
     if g.transport not in TRANSPORTS:
         raise ConfigError(
-            f"general.transport = '{g.transport}' ist ungueltig. "
-            f"Erlaubt: {', '.join(TRANSPORTS)}"
+            f"general.transport = '{g.transport}' is invalid. "
+            f"Allowed: {', '.join(TRANSPORTS)}"
         )
     if g.depth_policy not in DEPTH_POLICIES:
         raise ConfigError(
-            f"general.depth_policy = '{g.depth_policy}' ist ungueltig. "
-            f"Erlaubt: {', '.join(DEPTH_POLICIES)}"
+            f"general.depth_policy = '{g.depth_policy}' is invalid. "
+            f"Allowed: {', '.join(DEPTH_POLICIES)}"
         )
 
 
 def _validate_storage(s: StorageConfig) -> None:
     if s.backend not in BACKENDS:
         raise ConfigError(
-            f"storage.backend = '{s.backend}' wird nicht unterstuetzt. "
-            f"Verfuegbar: {', '.join(BACKENDS)}"
+            f"storage.backend = '{s.backend}' is not supported. "
+            f"Available: {', '.join(BACKENDS)}"
         )
     if s.batch_size < 1:
-        raise ConfigError("storage.batch_size muss >= 1 sein.")
+        raise ConfigError("storage.batch_size must be >= 1.")
     if s.queue_maxsize < 100:
-        raise ConfigError("storage.queue_maxsize muss >= 100 sein.")
+        raise ConfigError("storage.queue_maxsize must be >= 100.")
 
 
 def _validate_connection(c: ConnectionConfig) -> None:
     if c.reconnect_backoff_min_s <= 0:
-        raise ConfigError("connection.reconnect_backoff_min_s muss > 0 sein.")
+        raise ConfigError("connection.reconnect_backoff_min_s must be > 0.")
     if c.reconnect_backoff_max_s < c.reconnect_backoff_min_s:
         raise ConfigError(
-            "connection.reconnect_backoff_max_s muss >= reconnect_backoff_min_s sein."
+            "connection.reconnect_backoff_max_s must be >= reconnect_backoff_min_s."
         )
     if c.stale_after_s <= 0:
-        raise ConfigError("connection.stale_after_s muss > 0 sein.")
+        raise ConfigError("connection.stale_after_s must be > 0.")
     if c.ws_failures_before_rest < 1:
-        raise ConfigError("connection.ws_failures_before_rest muss >= 1 sein.")
+        raise ConfigError("connection.ws_failures_before_rest must be >= 1.")
     if c.rest_fallback_duration_s <= 0:
-        raise ConfigError("connection.rest_fallback_duration_s muss > 0 sein.")
+        raise ConfigError("connection.rest_fallback_duration_s must be > 0.")

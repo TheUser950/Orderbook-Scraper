@@ -1,4 +1,4 @@
-"""Datenstrukturen, die zwischen Adaptern, Sampler und Writer wandern."""
+"""Data structures passed between adapters, sampler and writer."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-# Ein Level ist immer (Preis, Menge) als String - exakt so, wie die Boerse es
-# geliefert hat. Bewusst kein float: die Konvertierung waere verlustbehaftet und
-# auf dem Schreibpfad ohnehin unnoetig. Geparst wird erst in der Auswertung.
+# A level is always (price, quantity) as strings - exactly as the exchange
+# delivered them. Deliberately not float: the conversion would be lossy and is
+# unnecessary on the write path anyway. Parsing happens at analysis time.
 Level = tuple[str, str]
 
-FLAG_STALE = 1 << 0  # Buch aelter als connection.stale_after_s
-FLAG_CROSSED = 1 << 1  # bester Bid >= bester Ask
-FLAG_PARTIAL = 1 << 2  # weniger Level als angefordert
+FLAG_STALE = 1 << 0  # book older than connection.stale_after_s
+FLAG_CROSSED = 1 << 1  # best bid >= best ask
+FLAG_PARTIAL = 1 << 2  # fewer levels than requested
 
 
 def now_ms() -> int:
@@ -23,11 +23,11 @@ def now_ms() -> int:
 
 @dataclass(frozen=True, slots=True)
 class BookState:
-    """Unveraenderlicher Zustand eines Top-N-Buchs zu einem Zeitpunkt.
+    """Immutable state of a top-N book at one point in time.
 
-    Adapter erzeugen bei jedem Update eine neue Instanz und weisen sie zu,
-    statt die bestehende zu mutieren. Dadurch sieht der Sampler immer einen
-    in sich konsistenten Zustand, ohne dass gesperrt werden muss.
+    Adapters build a new instance on every update and assign it instead of
+    mutating the existing one. That way the sampler always sees a internally
+    consistent state without any locking.
     """
 
     bids: tuple[Level, ...]
@@ -41,7 +41,7 @@ class BookState:
 
 @dataclass(frozen=True, slots=True)
 class OrderBookSnapshot:
-    """Eine Zeile in der snapshots-Tabelle."""
+    """One row in the snapshots table."""
 
     ts_grid: int
     ts_local: int
@@ -68,20 +68,20 @@ def _to_decimal(value: str) -> Decimal:
 
 
 class IncrementalBook:
-    """Lokal gepflegtes Orderbook aus Snapshot + Deltas.
+    """Order book maintained locally from snapshot + deltas.
 
-    Genutzt von den Boersen, die kein fertiges Top-N pushen (OKX, Bitget,
-    Bybit, Coinbase). Die Level liegen als dict, sortiert wird bewusst erst
-    beim Abruf in :meth:`top` - also einmal pro Sampling-Tick statt bei jedem
-    eingehenden Delta. Bei Coinbase mit mehreren tausend Leveln und hoher
-    Update-Frequenz ist das der Unterschied zwischen "laeuft nebenbei" und
-    "frisst eine CPU".
+    Used by the exchanges that do not push a ready-made top-N (OKX, Bitget,
+    Bybit, Coinbase). Levels are kept in dicts and sorting happens deliberately
+    only on read in :meth:`top` - that is once per sampling tick rather than on
+    every incoming delta. For Coinbase, with several thousand levels and a high
+    update rate, that is the difference between "runs in the background" and
+    "eats a CPU".
     """
 
     __slots__ = ("bids", "asks")
 
     def __init__(self) -> None:
-        # Decimal-Preis -> (Preis-String, Mengen-String)
+        # Decimal price -> (price string, quantity string)
         self.bids: dict[Decimal, Level] = {}
         self.asks: dict[Decimal, Level] = {}
 

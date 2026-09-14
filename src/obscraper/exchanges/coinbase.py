@@ -1,8 +1,8 @@
-"""Coinbase Exchange (ehem. Coinbase Pro) Spot.
+"""Coinbase Exchange (formerly Coinbase Pro) spot.
 
-level2_batch ist der einzige unauthentifizierte Kanal mit Orderbook-Tiefe:
-ein initiales "snapshot", danach "l2update"-Deltas im Coinbase-eigenen
-[side, price, size]-Format. Buchpflege daher zwingend lokal.
+level2_batch is the only unauthenticated channel with order book depth: an
+initial "snapshot", then "l2update" deltas in Coinbase's own
+[side, price, size] format. Book maintenance is therefore necessarily local.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from .base import BookUpdate, ExchangeAdapter, Level, SymbolStatus, parse_levels
 _PRODUCTS = "https://api.exchange.coinbase.com/products"
 _BOOK = "https://api.exchange.coinbase.com/products/{}/book"
 
-# Coinbase verlangt einen erkennbaren User-Agent; ohne ihn kommt gelegentlich 403.
+# Coinbase wants a recognisable User-Agent; without one it occasionally 403s.
 _HEADERS = {"User-Agent": "orderbook-scraper/0.1 (research use)"}
 
 

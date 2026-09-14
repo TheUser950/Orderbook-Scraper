@@ -1,10 +1,9 @@
-"""Binance Spot.
+"""Binance spot.
 
-Nutzt die "Partial Book Depth"-Streams (<symbol>@depth<N>@100ms), die bereits
-ein fertiges Top-N liefern - keine lokale Buchpflege noetig. Mehrere Symbole
-laufen ueber einen kombinierten Stream in einer einzigen Verbindung.
-Vier oeffentlich erreichbare Hosts machen Binance zu einem guten Kandidaten
-fuers Endpoint-Racing.
+Uses the "partial book depth" streams (<symbol>@depth<N>@100ms), which already
+deliver a finished top-N - no local book maintenance needed. Multiple symbols
+run over one combined stream on a single connection. Several publicly
+reachable hosts make Binance a good candidate for endpoint racing.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ class BinanceAdapter(ExchangeAdapter):
     ]
     REST_BASE = "https://api.binance.com"
     PARTIAL_DEPTHS = [5, 10, 20]
-    KEEPALIVE_INTERVAL = None  # websockets-Lib beantwortet Binance' Ping-Frames selbst
+    KEEPALIVE_INTERVAL = None  # the websockets lib answers Binance's pings itself
 
     @classmethod
     def native_symbol(cls, canonical: str) -> str:
@@ -66,9 +65,7 @@ class BinanceAdapter(ExchangeAdapter):
     async def fetch_listed_symbols(self, session: aiohttp.ClientSession) -> set[str]:
         data = await self.get_json(session, _EXCHANGE_INFO)
         return {
-            s["symbol"]
-            for s in data.get("symbols", [])
-            if s.get("status") == "TRADING"
+            s["symbol"] for s in data.get("symbols", []) if s.get("status") == "TRADING"
         }
 
     async def rest_depth(

@@ -1,8 +1,8 @@
-"""Gebatchter SQLite-Writer.
+"""Batched SQLite writer.
 
-Ein einziger Consumer-Task leert eine begrenzte Queue und schreibt gebuendelt.
-Die eigentlichen SQLite-Aufrufe laufen ueber ``asyncio.to_thread``, damit ein
-fsync nicht den Event-Loop anhaelt und dadurch das Sampling-Raster verschiebt.
+A single consumer task drains a bounded queue and writes in batches. The
+actual SQLite calls run via ``asyncio.to_thread`` so an fsync does not stall
+the event loop and thereby shift the sampling grid.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ class SqliteWriter:
         self._task: asyncio.Task | None = None
         self._warned_full = False
 
-    # -- Lebenszyklus ------------------------------------------------------
+    # -- Lifecycle ---------------------------------------------------------
 
     async def start(self, config_json: str, config_hash: str, version: str) -> int:
         path = Path(self.cfg.path).expanduser()
@@ -143,7 +143,7 @@ class SqliteWriter:
 
         self.run_id = await asyncio.to_thread(_open)
         self._task = asyncio.create_task(self._drain_loop(), name="sqlite-writer")
-        log.info("SQLite bereit: %s (run_id=%s)", path, self.run_id)
+        log.info("SQLite ready: %s (run_id=%s)", path, self.run_id)
         return self.run_id
 
     async def close(self) -> None:
@@ -153,7 +153,7 @@ class SqliteWriter:
         try:
             await asyncio.wait_for(self._task, timeout=30)
         except TimeoutError:
-            log.error("Writer-Task hat beim Herunterfahren nicht rechtzeitig geleert.")
+            log.error("Writer task did not drain in time during shutdown.")
             self._task.cancel()
 
         def _finish() -> None:
@@ -168,12 +168,12 @@ class SqliteWriter:
         await asyncio.to_thread(_finish)
         self._conn = None
         log.info(
-            "SQLite geschlossen. %d Zeilen geschrieben, %d verworfen.",
+            "SQLite closed. %d rows written, %d dropped.",
             self.written,
             self.dropped,
         )
 
-    # -- Eingang -----------------------------------------------------------
+    # -- Intake ------------------------------------------------------------
 
     def submit_snapshot(self, snap: OrderBookSnapshot) -> None:
         self._put(
@@ -207,9 +207,7 @@ class SqliteWriter:
         endpoint: str | None = None,
         detail: str | None = None,
     ) -> None:
-        self._put(
-            (EVENT, (now_ms(), self.run_id, exchange, event, endpoint, detail))
-        )
+        self._put((EVENT, (now_ms(), self.run_id, exchange, event, endpoint, detail)))
 
     def submit_latency(
         self,
@@ -240,9 +238,8 @@ class SqliteWriter:
             return
         except asyncio.QueueFull:
             pass
-        # Die Queue ist begrenzt, damit ein haengender Writer nicht unbemerkt
-        # Speicher frisst. Im Zweifel ist der aelteste Snapshot der am
-        # wenigsten interessante.
+        # The queue is bounded so a stalled writer cannot silently eat memory.
+        # When in doubt, the oldest snapshot is the least interesting one.
         try:
             self._queue.get_nowait()
             self.dropped += 1
@@ -255,8 +252,8 @@ class SqliteWriter:
         if not self._warned_full:
             self._warned_full = True
             log.warning(
-                "Schreib-Queue ist voll (maxsize=%d) - Zeilen werden verworfen. "
-                "Intervall zu klein oder Datentraeger zu langsam?",
+                "Write queue is full (maxsize=%d) - rows are being dropped. "
+                "Interval too small or storage too slow?",
                 self.cfg.queue_maxsize,
             )
 
@@ -311,8 +308,8 @@ class SqliteWriter:
                     conn.executemany(_LAT_SQL, lats)
                 conn.commit()
             except sqlite3.Error:
-                # Ein fehlgeschlagener Batch darf den Scraper nicht beenden -
-                # laufende Verbindungen sind wertvoller als diese paar Zeilen.
+                # A failed batch must not terminate the scraper - the running
+                # connections are worth more than these few rows.
                 conn.rollback()
                 raise
 
@@ -321,4 +318,4 @@ class SqliteWriter:
             self.written += len(snaps)
         except sqlite3.Error as exc:
             self.dropped += len(batch)
-            log.error("SQLite-Schreibfehler, %d Zeilen verloren: %s", len(batch), exc)
+            log.error("SQLite write error, %d rows lost: %s", len(batch), exc)

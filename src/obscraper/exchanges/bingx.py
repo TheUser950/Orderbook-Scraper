@@ -1,14 +1,13 @@
-"""BingX Spot.
+"""BingX spot.
 
-Der Markt-WebSocket komprimiert jeden Frame per gzip, inklusive des
-Text-Heartbeats: der Server schickt periodisch den (komprimierten) String
-"Ping", worauf unkomprimiert mit "Pong" geantwortet werden muss.
+The market WebSocket gzip-compresses every frame, including the text
+heartbeat: the server periodically sends the (compressed) string "Ping", which
+has to be answered with an uncompressed "Pong".
 
-Hinweis: BingX' oeffentliche Doku zu den exakten Feldnamen des Depth-Kanals
-ist duenn/wandelt sich gelegentlich. parse() ist entsprechend defensiv
-geschrieben - eine unerwartete Struktur fuehrt zu einer leeren Liste statt
-einer Exception, der Supervisor reconnectet und die anderen Boersen laufen
-unbeeintraechtigt weiter.
+Note: the public documentation of the exact field names on the depth channel
+is thin and changes occasionally. parse() is written defensively because of
+that - an unexpected structure yields an empty list rather than an exception,
+the supervisor reconnects, and the other exchanges keep running unaffected.
 """
 
 from __future__ import annotations

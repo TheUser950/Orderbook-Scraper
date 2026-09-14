@@ -1,18 +1,17 @@
-"""MEXC Spot.
+"""MEXC spot.
 
-MEXC hat den JSON-WebSocket 2025 abgekuendigt; der aktuelle Kanal
-``spot@public.limit.depth.v3.api.pb@SYMBOL@N`` liefert ausschliesslich
-Protobuf. Dekodiert wird ueber den abhaengigkeitsfreien Wire-Format-Leser in
-``_protobuf.py`` (Begruendung und Grenzen dort dokumentiert).
+MEXC retired the JSON WebSocket in 2025; the current channel
+``spot@public.limit.depth.v3.api.pb@SYMBOL@N`` delivers protobuf only. It is
+decoded with the dependency-free wire-format reader in ``_protobuf.py``
+(reasoning and limits documented there).
 
-Kontrollnachrichten (Subscribe-Bestaetigung, PONG) kommen weiterhin als
-JSON-Textframes, Marktdaten als Binaerframes - beides wird hier getrennt
-behandelt.
+Control messages (subscribe acknowledgement, PONG) still arrive as JSON text
+frames, market data as binary frames - both are handled separately here.
 
-Faellt das Protobuf-Parsen wiederholt aus (etwa weil MEXC Feldnummern
-umnummeriert), schaltet der Supervisor im transport=auto-Modus automatisch
-auf REST-Polling um. Bei getaktetem Sampling ist das qualitativ nahezu
-gleichwertig, nur mit etwas hoeherer Latenz.
+If protobuf parsing fails repeatedly (for instance because MEXC renumbers
+fields), the supervisor switches to REST polling automatically in
+transport=auto mode. With grid sampling that is almost equivalent in quality,
+just with slightly higher latency.
 """
 
 from __future__ import annotations
@@ -37,13 +36,13 @@ _EXCHANGE_INFO = "https://api.mexc.com/api/v3/exchangeInfo"
 _DEPTH = "https://api.mexc.com/api/v3/depth"
 _LISTED_STATES = {"ENABLED", "TRADING", "1"}
 
-# Feldnummern laut mexcdevelop/websocket-proto
+# Field numbers per mexcdevelop/websocket-proto
 _WRAP_CHANNEL = 1
 _WRAP_SYMBOL = 3
 _WRAP_CREATE_TIME = 5
 _WRAP_SEND_TIME = 6
-_WRAP_LIMIT_DEPTHS = 303  # PublicLimitDepthsV3Api  (Top-N-Snapshot)
-_WRAP_AGGRE_DEPTHS = 313  # PublicAggreDepthsV3Api  (aggregiert/inkrementell)
+_WRAP_LIMIT_DEPTHS = 303  # PublicLimitDepthsV3Api  (top-N snapshot)
+_WRAP_AGGRE_DEPTHS = 313  # PublicAggreDepthsV3Api  (aggregated/incremental)
 
 _DEPTHS_ASKS = 1
 _DEPTHS_BIDS = 2
@@ -58,7 +57,7 @@ class MexcAdapter(ExchangeAdapter):
     WS_ENDPOINTS = ["wss://wbs-api.mexc.com/ws"]
     REST_BASE = "https://api.mexc.com"
     PARTIAL_DEPTHS = [5, 10, 20]
-    KEEPALIVE_INTERVAL = 20.0  # Server trennt nach 30s Stille
+    KEEPALIVE_INTERVAL = 20.0  # the server disconnects after 30s of silence
     MIN_REST_INTERVAL_MS = 500
 
     def __init__(self, cfg, conn) -> None:
@@ -87,22 +86,22 @@ class MexcAdapter(ExchangeAdapter):
         return {"method": "PING"}
 
     def decode_frame(self, raw: str | bytes) -> Any:
-        # Marktdaten kommen binaer (Protobuf), Kontrollnachrichten als JSON-Text.
-        # Der Binaerfall wird markiert statt sofort geparst, damit ein
-        # fehlerhaftes Frame in parse() sauber abgefangen werden kann.
+        # Market data arrives binary (protobuf), control messages as JSON text.
+        # The binary case is tagged rather than parsed immediately so a broken
+        # frame can be caught cleanly in parse().
         if isinstance(raw, (bytes, bytearray)):
             return ("pb", bytes(raw))
         return super().decode_frame(raw)
 
     def reactive_reply(self, msg: Any) -> Any | None:
-        # MEXC verlangt eine PONG-Antwort, falls der Server von sich aus pingt.
+        # MEXC expects a PONG reply if the server pings on its own.
         if isinstance(msg, dict) and str(msg.get("msg", "")).upper() == "PING":
             return {"method": "PONG"}
         return None
 
     def parse(self, msg: Any) -> list[BookUpdate]:
         if not (isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "pb"):
-            return []  # JSON-Kontrollframe (Subscribe-Ack, PONG)
+            return []  # JSON control frame (subscribe ack, PONG)
         try:
             return self._parse_protobuf(msg[1])
         except ProtobufError as exc:
@@ -110,9 +109,9 @@ class MexcAdapter(ExchangeAdapter):
             self.last_error = f"ProtobufError: {exc}"
             if self.protobuf_errors in (1, 10, 100):
                 log.warning(
-                    "%s: Protobuf-Frame nicht lesbar (%dx): %s. Hat MEXC das "
-                    "Schema geaendert? Bei anhaltendem Fehler greift im "
-                    "transport=auto-Modus der REST-Fallback.",
+                    "%s: protobuf frame unreadable (%dx): %s. Did MEXC change "
+                    "the schema? If this persists, the REST fallback kicks in "
+                    "in transport=auto mode.",
                     self.name,
                     self.protobuf_errors,
                     exc,
@@ -134,11 +133,11 @@ class MexcAdapter(ExchangeAdapter):
                 is_snapshot = snapshot
                 break
         if body is None:
-            return []  # anderer Kanal im selben Wrapper - nicht unser Problem
+            return []  # a different channel in the same wrapper - not our problem
 
         native_symbol = get_str(wrapper, _WRAP_SYMBOL)
         if not native_symbol:
-            # Fallback: Symbol steht auch am Ende des Kanalnamens
+            # Fallback: the symbol is also part of the channel name.
             channel = get_str(wrapper, _WRAP_CHANNEL) or ""
             parts = channel.split("@")
             native_symbol = parts[-2] if len(parts) >= 2 else ""

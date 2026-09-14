@@ -1,11 +1,10 @@
 # ---------------------------------------------------------------------------
-# Orderbook-Scraper Konfiguration
+# Order book scraper configuration
 # ---------------------------------------------------------------------------
 
 general:
-  # Kanonische Schreibweise BASE/QUOTE. Die Uebersetzung in die
-  # boersen-eigene Schreibweise (ETHUSDC, ETH-USDC, ETH_USDC, ...)
-  # macht der jeweilige Adapter selbst.
+  # Canonical BASE/QUOTE spelling. Translating into each exchange's own
+  # spelling (ETHUSDC, ETH-USDC, ETH_USDC, ...) is the adapter's job.
   symbols:
     - "ETH/USDC"
     - "ETH/USDT"
@@ -13,28 +12,28 @@ general:
     - "STRK/USDC"
     - "SOL/USDC"
 
-  # Sampling-Raster in Millisekunden. Der WebSocket laeuft in der Kadenz der
-  # Boerse; hier wird festgelegt, wie oft der aktuelle Buchzustand
-  # weggeschrieben wird. Alle Boersen werden auf demselben Raster abgegriffen.
+  # Sampling grid in milliseconds. The WebSocket runs at the exchange's own
+  # cadence; this sets how often the current book state is written out. All
+  # exchanges are sampled on the same grid.
   #
-  # 100ms ist die sinnvolle Untergrenze: Binance, OKX, Bitget, Bybit, KuCoin
-  # und Gate pushen in dieser Kadenz. MEXC (500ms), BingX (~600ms) und HTX
-  # (1000ms) pushen langsamer - deren Zeilen wiederholen sich entsprechend,
-  # erkennbar an gleichbleibender seq und steigendem age_ms.
+  # 100ms is the sensible lower bound: Binance, OKX, Bitget, Bybit, KuCoin and
+  # Gate push at that rate. MEXC (500ms), BingX (~600ms) and HTX (1000ms) push
+  # more slowly, so their rows repeat accordingly - recognisable by an
+  # unchanged seq and a rising age_ms.
   interval_ms: 100
 
-  # Gewuenschte Orderbook-Tiefe je Seite.
+  # Desired order book depth per side.
   depth: 20
 
-  # Was tun, wenn eine Boerse genau diese Tiefe nicht anbietet?
-  #   at_least  -> naechstgroessere unterstuetzte Stufe (Default)
-  #   at_most   -> naechstkleinere Stufe
-  #   nearest   -> naechstliegende Stufe
+  # What to do when an exchange does not offer exactly this depth?
+  #   at_least  -> next larger supported tier (default)
+  #   at_most   -> next smaller tier
+  #   nearest   -> closest tier
   depth_policy: at_least
 
-  # ws   -> nur WebSocket
-  # rest -> nur REST-Polling
-  # auto -> WebSocket bevorzugt, bei dauerhaftem Fehlschlag REST-Fallback
+  # ws   -> WebSocket only
+  # rest -> REST polling only
+  # auto -> prefer WebSocket, fall back to REST on persistent failure
   transport: auto
 
   log_level: INFO
@@ -47,36 +46,37 @@ storage:
   queue_maxsize: 20000
 
 connection:
-  # Misst beim Start die Latenz aller bekannten WS-Endpunkte einer Boerse
-  # und verbindet sich mit dem schnellsten.
+  # Measures the latency of all known WS endpoints of an exchange at startup
+  # and connects to the fastest one.
   pick_fastest_endpoint: true
   latency_probe_timeout_s: 5
   latency_probe_rounds: 2
-  # Periodische Neubewertung (0 = aus). Gewechselt wird nur bei deutlicher
-  # Verbesserung, damit die Verbindung nicht staendig neu aufgebaut wird.
+  # Periodic re-evaluation (0 = off). The endpoint is only switched on a clear
+  # improvement, so the connection is not rebuilt constantly.
   relatency_interval_s: 3600
   relatency_improvement_pct: 25
 
   reconnect_backoff_min_s: 1
   reconnect_backoff_max_s: 60
-  # Nur bei transport: auto - scheitert der WebSocket so oft hintereinander
-  # (z.B. weil eine Boerse ihr Protokoll geaendert hat), wird fuer
-  # rest_fallback_duration_s auf REST-Polling umgeschaltet und danach der
-  # WebSocket erneut versucht. So reisst der Datensatz nie ab.
+  # transport: auto only - if the WebSocket fails this many times in a row
+  # (e.g. because an exchange changed its protocol), the adapter switches to
+  # REST polling for rest_fallback_duration_s and then retries the WebSocket.
+  # That way the dataset never breaks off.
   ws_failures_before_rest: 3
   rest_fallback_duration_s: 600
-  # Kommt so lange kein Update, gilt das Buch als veraltet -> Zwangs-Reconnect.
+  # If no update arrives for this long, the book counts as stale -> forced
+  # reconnect.
   stale_after_s: 15
-  # Veraltete Snapshots trotzdem schreiben (mit gesetztem stale-Flag)?
-  # true ist empfohlen: Luecken bleiben so im Datensatz nachvollziehbar.
+  # Write stale snapshots anyway (with the stale flag set)? true is
+  # recommended: it keeps gaps traceable inside the dataset.
   record_stale_snapshots: true
   ws_ping_interval_s: 20
   rest_timeout_s: 10
-  # Statusbericht ins Log, alle N Sekunden (0 = aus).
+  # Status report to the log, every N seconds (0 = off).
   health_report_interval_s: 60
 
-# Pro Boerse ueberschreibbar: enabled, depth, transport, ws_endpoints,
-# symbol_override (kanonisch -> nativ), rest_interval_ms
+# Overridable per exchange: enabled, depth, transport, ws_endpoints,
+# symbol_override (canonical -> native), rest_interval_ms
 exchanges:
   binance:  { enabled: true }
   okx:      { enabled: true }
@@ -87,6 +87,6 @@ exchanges:
   htx:      { enabled: true }
   coinbase: { enabled: true }
   bingx:    { enabled: true }
-  # MEXC laeuft ueber den Protobuf-WebSocket (siehe exchanges/_protobuf.py).
-  # Schlaegt der fehl, greift automatisch der REST-Fallback von oben.
+  # MEXC runs over the protobuf WebSocket (see exchanges/_protobuf.py). If that
+  # fails, the REST fallback above kicks in automatically.
   mexc:     { enabled: true }

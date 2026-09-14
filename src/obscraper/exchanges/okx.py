@@ -1,11 +1,10 @@
-"""OKX Spot.
+"""OKX spot.
 
-Fuer Tiefe <= 5 wird der guenstige ``books5``-Kanal genutzt (jede Nachricht
-ist bereits ein vollstaendiges Top-5-Snapshot). Fuer groessere Tiefen kommt
-der inkrementelle ``books``-Kanal (Snapshot + Deltas) zum Einsatz und das Buch
-wird lokal zusammengesetzt. Die von OKX mitgelieferte Checksumme wird aktuell
-nicht verifiziert - fuer Forschungszwecke ausreichend, aber im Auge zu
-behalten (siehe README).
+For depth <= 5 the cheap ``books5`` channel is used (every message is already
+a complete top-5 snapshot). For greater depths the incremental ``books``
+channel (snapshot + deltas) is used and the book is reassembled locally. The
+checksum OKX ships along is currently not verified - good enough for research
+purposes, but worth keeping in mind (see README).
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ class OkxAdapter(ExchangeAdapter):
         "wss://wsaws.okx.com:8443/ws/v5/public",
     ]
     REST_BASE = "https://www.okx.com"
-    MAINTAINS_BOOK = True  # jede erreichbare Tiefe, egal ob books5 oder books
+    MAINTAINS_BOOK = True  # any reachable depth, whether books5 or books
     KEEPALIVE_INTERVAL = 20.0
 
     def __init__(self, cfg, conn) -> None:
@@ -53,7 +52,8 @@ class OkxAdapter(ExchangeAdapter):
         return "ping"
 
     def reactive_reply(self, msg: Any) -> Any | None:
-        return None  # OKX schickt selbst kein Server-Ping, nur "pong" auf unseres
+        # OKX sends no server ping of its own, only "pong" in reply to ours.
+        return None
 
     def parse(self, msg: Any) -> list[BookUpdate]:
         if not isinstance(msg, dict) or "arg" not in msg or "data" not in msg:
@@ -61,7 +61,7 @@ class OkxAdapter(ExchangeAdapter):
         if msg["arg"].get("channel") != self.channel:
             return []
         native_symbol = msg["arg"].get("instId", "")
-        action = msg.get("action", "snapshot")  # books5 hat kein "action"
+        action = msg.get("action", "snapshot")  # books5 carries no "action"
         out = []
         for entry in msg["data"]:
             out.append(
@@ -84,7 +84,9 @@ class OkxAdapter(ExchangeAdapter):
         self, session: aiohttp.ClientSession, sym: SymbolStatus
     ) -> BookUpdate | None:
         data = await self.get_json(
-            session, _BOOKS, params={"instId": sym.native, "sz": str(self.effective_depth)}
+            session,
+            _BOOKS,
+            params={"instId": sym.native, "sz": str(self.effective_depth)},
         )
         rows = data.get("data") or []
         if not rows:

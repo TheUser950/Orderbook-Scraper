@@ -1,8 +1,7 @@
-"""Writer-Schnittstelle.
+"""Writer interface.
 
-Bewusst als Protocol formuliert, damit spaeter ein Postgres-/TimescaleDB-Writer
-danebengestellt werden kann, ohne dass Sampler, Supervisor oder Adapter
-angefasst werden muessen.
+Deliberately expressed as a Protocol so a Postgres/TimescaleDB writer can be
+added alongside later without touching the sampler, supervisor or adapters.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from ..models import OrderBookSnapshot
 
 class Writer(Protocol):
     async def start(self, config_json: str, config_hash: str, version: str) -> int:
-        """Legt das Schema an, registriert den Lauf und liefert die run_id."""
+        """Create the schema, register the run and return the run_id."""
         ...
 
     def submit_snapshot(self, snap: OrderBookSnapshot) -> None: ...
@@ -26,10 +25,10 @@ class Writer(Protocol):
         endpoint: str | None = None,
         detail: str | None = None,
     ) -> None:
-        """Verbindungsereignis protokollieren (connect, disconnect, error, ...).
+        """Record a connection event (connect, disconnect, error, ...).
 
-        Landet in der DB, nicht nur im Log: bei der spaeteren Auswertung muss
-        nachvollziehbar sein, warum eine Luecke im Datensatz existiert.
+        This goes into the database, not just the log: when analysing the data
+        later it must be possible to tell why a gap in the dataset exists.
         """
         ...
 
@@ -43,5 +42,5 @@ class Writer(Protocol):
     ) -> None: ...
 
     async def close(self) -> None:
-        """Restliche Zeilen schreiben und Verbindung sauber schliessen."""
+        """Write out the remaining rows and close the connection cleanly."""
         ...

@@ -1,11 +1,11 @@
-"""Gemeinsame Basis aller Boersen-Adapter.
+"""Common base for all exchange adapters.
 
-Kernidee: Ein Adapter haelt ein *lebendes* Top-N-Buch je Symbol im Speicher.
-Wie er das tut - Push eines fertigen Top-N, Snapshot plus Deltas, oder
-REST-Polling - ist seine Sache und fuer den Rest des Programms unsichtbar.
-Der Sampler greift dieses Buch im Wall-Clock-Takt ab. Dadurch liefert eine
-Boerse im REST-Fallback Daten derselben Form wie eine per WebSocket, und eine
-haengende Verbindung blockiert nie die anderen neun.
+Core idea: an adapter keeps a *live* top-N book per symbol in memory. How it
+does that - a ready-made top-N push, snapshot plus deltas, or REST polling -
+is its own business and invisible to the rest of the program. The sampler
+reads that book on the wall-clock grid. As a result an exchange on the REST
+fallback produces data of the same shape as one on a WebSocket, and a stalled
+connection never blocks the other nine.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import logging
 import time
 import zlib
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -41,9 +41,9 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class BookUpdate:
-    """Ein geparster Orderbook-Frame, boersenunabhaengig."""
+    """A parsed order book frame, in exchange-independent form."""
 
-    symbol: str  # native Schreibweise der Boerse
+    symbol: str  # exchange-native spelling
     bids: list[Level]
     asks: list[Level]
     ts_exchange: int | None = None
@@ -55,17 +55,17 @@ class BookUpdate:
 class SymbolStatus:
     canonical: str
     native: str
-    listed: bool | None = None  # None = nicht geprueft
+    listed: bool | None = None  # None = not checked
     note: str = ""
 
 
 def parse_levels(raw: Any, limit: int | None = None) -> list[Level]:
-    """Normalisiert die diversen Level-Formate auf [(preis, menge), ...].
+    """Normalise the various level formats to [(price, quantity), ...].
 
-    Deckt ``[["1.0","2.0"], ...]`` (die meisten), ``[["1.0","2.0","0","1"]]``
-    (OKX/Bitget mit Zusatzfeldern) und ``[[1.0, 2.0]]`` (numerisch, z.B. HTX)
-    ab. Zahlen werden per repr in Strings ueberfuehrt, damit der Schreibpfad
-    durchgaengig stringbasiert bleibt.
+    Covers ``[["1.0","2.0"], ...]`` (most exchanges),
+    ``[["1.0","2.0","0","1"]]`` (OKX/Bitget with extra fields) and
+    ``[[1.0, 2.0]]`` (numeric, e.g. HTX). Numbers are converted to strings via
+    repr so the write path stays string-based throughout.
     """
     out: list[Level] = []
     if not raw:
@@ -86,20 +86,20 @@ def parse_levels(raw: Any, limit: int | None = None) -> list[Level]:
 
 
 class ExchangeAdapter(ABC):
-    # -- Deklaration je Boerse --------------------------------------------
+    # -- Per-exchange declaration -----------------------------------------
     name: str = ""
     WS_ENDPOINTS: list[str] = []
     REST_BASE: str = ""
-    # Nativ per Push verfuegbare Top-N-Stufen. Leer = Buch wird lokal gepflegt.
+    # Top-N tiers available as a native push. Empty = book is maintained locally.
     PARTIAL_DEPTHS: list[int] = []
-    # True, wenn der Kanal Snapshot + Deltas liefert und lokal zusammengesetzt
-    # werden muss (OKX, Bitget, Bybit, Coinbase).
+    # True when the channel delivers snapshot + deltas that have to be
+    # reassembled locally (OKX, Bitget, Bybit, Coinbase).
     MAINTAINS_BOOK: bool = False
     GZIP_FRAMES: bool = False
     KEEPALIVE_INTERVAL: float | None = None
     SUPPORTS_WS: bool = True
     SUPPORTS_REST: bool = True
-    # Maximale REST-Polling-Frequenz, um nicht in Rate-Limits zu laufen.
+    # Fastest REST polling rate, to stay clear of rate limits.
     MIN_REST_INTERVAL_MS: int = 200
 
     def __init__(self, cfg: ExchangeConfig, conn: ConnectionConfig) -> None:
@@ -127,49 +127,49 @@ class ExchangeAdapter(ABC):
         self.messages = 0
         self.last_error: str | None = None
 
-    # -- Von Unterklassen zu implementieren --------------------------------
+    # -- To be implemented by subclasses -----------------------------------
 
     @classmethod
     @abstractmethod
     def native_symbol(cls, canonical: str) -> str:
-        """'ETH/USDC' -> boersen-eigene Schreibweise."""
+        """'ETH/USDC' -> the exchange's own spelling."""
 
     @abstractmethod
     async def fetch_listed_symbols(self, session: aiohttp.ClientSession) -> set[str]:
-        """Native Symbole, die die Boerse aktuell im Spot-Handel fuehrt."""
+        """Native symbols the exchange currently trades on spot."""
 
     @abstractmethod
     async def rest_depth(
         self, session: aiohttp.ClientSession, sym: SymbolStatus
     ) -> BookUpdate | None:
-        """Einmaliges Orderbook per REST."""
+        """A single order book fetched over REST."""
 
     def parse(self, msg: Any) -> list[BookUpdate]:
-        """Frame -> Updates. Leere Liste fuer alles Uninteressante."""
+        """Frame -> updates. Empty list for anything not of interest."""
         return []
 
     async def ws_url(self, endpoint: str, session: aiohttp.ClientSession) -> str:
-        """Erlaubt Adaptern, die URL dynamisch zu bilden (Streams, Token)."""
+        """Lets adapters build the URL dynamically (streams, tokens)."""
         return endpoint
 
     def subscribe_payloads(self) -> list[Any]:
-        """Nachrichten, die direkt nach dem Verbinden gesendet werden."""
+        """Messages sent immediately after connecting."""
         return []
 
     def keepalive_payload(self) -> Any | None:
-        """Periodisch zu sendender Heartbeat (Intervall: KEEPALIVE_INTERVAL)."""
+        """Heartbeat to send periodically (interval: KEEPALIVE_INTERVAL)."""
         return None
 
     def reactive_reply(self, msg: Any) -> Any | None:
-        """Antwort auf ein server-initiiertes Ping. None = kein Ping."""
+        """Reply to a server-initiated ping. None = not a ping."""
         return None
 
-    # -- Tiefen-Aufloesung -------------------------------------------------
+    # -- Depth resolution --------------------------------------------------
 
     def _resolve_depth(self) -> int:
-        """Bildet die Wunschtiefe auf eine von der Boerse angebotene Stufe ab."""
+        """Map the requested depth onto a tier the exchange actually offers."""
         if self.MAINTAINS_BOOK or not self.PARTIAL_DEPTHS:
-            # Lokal gepflegtes Buch: jede Tiefe ist erreichbar.
+            # Locally maintained book: any depth is reachable.
             return self.requested_depth
 
         supported = sorted(self.PARTIAL_DEPTHS)
@@ -189,7 +189,7 @@ class ExchangeAdapter(ABC):
             chosen = min(supported, key=lambda s: (abs(s - want), s))
 
         log.info(
-            "%s: Tiefe %d nicht verfuegbar (unterstuetzt: %s) -> %d [%s]",
+            "%s: depth %d not available (supported: %s) -> %d [%s]",
             self.name,
             want,
             supported,
@@ -198,7 +198,7 @@ class ExchangeAdapter(ABC):
         )
         return chosen
 
-    # -- Frame-Verarbeitung ------------------------------------------------
+    # -- Frame handling ----------------------------------------------------
 
     def decode_frame(self, raw: str | bytes) -> Any:
         if isinstance(raw, (bytes, bytearray)):
@@ -241,7 +241,8 @@ class ExchangeAdapter(ABC):
             body = await resp.read()
             if resp.status != 200:
                 raise RuntimeError(
-                    f"HTTP {resp.status} von {url}: {body[:200].decode('utf-8', 'replace')}"
+                    f"HTTP {resp.status} from {url}: "
+                    f"{body[:200].decode('utf-8', 'replace')}"
                 )
             return orjson.loads(body)
 
@@ -257,7 +258,7 @@ class ExchangeAdapter(ABC):
     async def run_ws(
         self, endpoint: str, session: aiohttp.ClientSession, on_connect=None
     ) -> None:
-        """Verbindet, abonniert und laeuft, bis die Verbindung abbricht."""
+        """Connect, subscribe and run until the connection drops."""
         url = await self.ws_url(endpoint, session)
         async with ws_connect(
             url,
@@ -293,7 +294,7 @@ class ExchangeAdapter(ABC):
                     keepalive.cancel()
 
     def _handle_frame(self, raw: str | bytes) -> Any | None:
-        """Verarbeitet einen Frame und liefert eine ggf. noetige Antwort zurueck."""
+        """Process one frame and return a reply if the protocol needs one."""
         msg = self.decode_frame(raw)
         self.messages += 1
 
@@ -316,7 +317,7 @@ class ExchangeAdapter(ABC):
     # -- REST --------------------------------------------------------------
 
     async def run_rest(self, session: aiohttp.ClientSession) -> None:
-        """Pollt das Orderbook im Sampling-Takt, bis der Task abgebrochen wird."""
+        """Poll the order book on the sampling grid until the task is cancelled."""
         self.transport = "rest"
         self.endpoint = self.REST_BASE
         interval_ms = max(
@@ -337,7 +338,7 @@ class ExchangeAdapter(ABC):
                         raise
                     except Exception as exc:
                         self.last_error = f"{type(exc).__name__}: {exc}"
-                        log.debug("%s REST-Fehler (%s): %s", self.name, sym.native, exc)
+                        log.debug("%s REST error (%s): %s", self.name, sym.native, exc)
                         continue
                     if upd is not None:
                         self.messages += 1
@@ -347,10 +348,10 @@ class ExchangeAdapter(ABC):
         finally:
             self.connected = False
 
-    # Wird vom Supervisor gesetzt, damit REST im Sampling-Takt pollt.
+    # Set by the supervisor so REST polls on the sampling grid.
     conn_interval_ms: int = 1000
 
-    # -- Buchpflege --------------------------------------------------------
+    # -- Book maintenance --------------------------------------------------
 
     def _apply(self, upd: BookUpdate) -> None:
         canonical = self.by_native.get(upd.symbol)
@@ -378,7 +379,7 @@ class ExchangeAdapter(ABC):
         )
         self.last_update_mono[canonical] = time.monotonic()
 
-    # -- Abgriff durch den Sampler ----------------------------------------
+    # -- Read-out by the sampler ------------------------------------------
 
     def snapshot(self, sym: SymbolStatus, ts_grid: int) -> OrderBookSnapshot | None:
         state = self.books.get(sym.canonical)
@@ -419,22 +420,22 @@ class ExchangeAdapter(ABC):
             flags=flags,
         )
 
-    # -- Symbolpruefung ----------------------------------------------------
+    # -- Symbol validation -------------------------------------------------
 
     async def validate_symbols(self, session: aiohttp.ClientSession) -> None:
-        """Prueft gegen die Instrumentenliste, ob die Paare gelistet sind.
+        """Check the configured pairs against the exchange's instrument list.
 
-        Ein nicht gelistetes Paar soll laut auffallen, statt still leere Daten
-        zu erzeugen - ETH/USDC fuehrt nicht jede der zehn Boersen.
+        An unlisted pair should fail loudly instead of silently producing empty
+        data - not every exchange lists every pair.
         """
         try:
             listed = await self.fetch_listed_symbols(session)
         except Exception as exc:
             for sym in self.symbols:
                 sym.listed = None
-                sym.note = f"Pruefung fehlgeschlagen: {type(exc).__name__}"
+                sym.note = f"check failed: {type(exc).__name__}"
             log.warning(
-                "%s: Instrumentenliste nicht abrufbar (%s) - versuche es trotzdem.",
+                "%s: instrument list unavailable (%s) - trying anyway.",
                 self.name,
                 exc,
             )
@@ -444,7 +445,7 @@ class ExchangeAdapter(ABC):
         for sym in self.symbols:
             sym.listed = sym.native.upper() in normalised
             if not sym.listed:
-                sym.note = "nicht gelistet"
+                sym.note = "not listed"
 
     def active_symbols(self) -> list[SymbolStatus]:
         return [s for s in self.symbols if s.listed is not False]
@@ -455,7 +456,7 @@ class ExchangeAdapter(ABC):
     # -- Status ------------------------------------------------------------
 
     def staleness(self) -> float | None:
-        """Sekunden seit dem letzten Update ueber alle Symbole (None = noch nie)."""
+        """Seconds since the last update across all symbols (None = never)."""
         if not self.last_update_mono:
             return None
         return time.monotonic() - max(self.last_update_mono.values())

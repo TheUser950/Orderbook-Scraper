@@ -1,15 +1,14 @@
-# Orderbook-Scraper
+# Orderbook Scraper
 
-Sammelt L2-Orderbook-Daten (Top-N bids/asks) von zehn Krypto-Boersen
-gleichzeitig - per WebSocket wo moeglich, per REST-Polling als Fallback -
-und schreibt sie getaktet in eine SQLite-Datenbank fuer die spaetere
-Forschung. Laeuft eigenstaendig, ist fehlertolerant (eine tote Boerse
-beendet nie den Prozess) und protokolliert Verbindungsereignisse mit, damit
-Luecken im Datensatz spaeter nachvollziehbar sind.
+Collects L2 order book data (top-N bids/asks) from ten crypto exchanges
+simultaneously - over WebSocket where possible, with REST polling as a
+fallback - and writes it on a fixed grid into a SQLite database for later
+research. It runs unattended, tolerates failures (a dead exchange never stops
+the process) and records connection events so gaps in the dataset stay
+traceable.
 
-Unterstuetzte Boersen: Binance, OKX, Bybit, Bitget, KuCoin, Gate, HTX,
-Coinbase, BingX, MEXC - alle per WebSocket, mit REST als automatischem
-Rettungsanker.
+Supported exchanges: Binance, OKX, Bybit, Bitget, KuCoin, Gate, HTX, Coinbase,
+BingX, MEXC - all over WebSocket, with REST as an automatic safety net.
 
 ## Setup
 
@@ -19,78 +18,77 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Konfiguration
+On Linux the activation is `source .venv/bin/activate`.
 
-Alles Wesentliche steht in `config.yaml`: Symbole (`BASE/QUOTE`, z.B.
-`ETH/USDC`), Sampling-Intervall, gewuenschte Orderbook-Tiefe, Transport
-(`ws` / `rest` / `auto`) und pro Boerse aktivierbar/deaktivierbar. Details
-und alle Optionen sind in der Datei selbst kommentiert.
+## Configuration
 
-Wichtig: **Nicht jede Boerse listet jedes Paar.** Beim Start (und im
-`--dry-run`) wird das gegen die Instrumentenliste jeder Boerse geprueft;
-nicht gelistete Paare werden uebersprungen und deutlich geloggt statt
-still leere Daten zu erzeugen.
+Everything relevant lives in `config.yaml`: symbols (`BASE/QUOTE`, e.g.
+`ETH/USDC`), sampling interval, desired order book depth, transport
+(`ws` / `rest` / `auto`) and a per-exchange on/off switch. All options are
+commented in the file itself.
 
-## Benutzung
+Important: **not every exchange lists every pair.** This is checked against
+each exchange's instrument list at startup (and in `--dry-run`); unlisted
+pairs are skipped and logged clearly instead of silently producing empty data.
+
+## Usage
 
 ```powershell
-# Config, Listings und Endpoint-Latenzen pruefen - schreibt nichts
+# Check config, listings and endpoint latencies - writes nothing
 python run.py --dry-run
 
-# Normal laufen lassen, bis Ctrl+C
+# Run normally, until Ctrl+C
 python run.py
 
-# Zeitlich begrenzt (z.B. fuer Tests)
+# Time-boxed (e.g. for testing)
 python run.py --duration 120
 
-# Andere Config-Datei
+# Different config file
 python run.py --config other.yaml
 ```
 
-Logs landen in `logs/scraper.log` (rotierend), Daten in `data/orderbook.db`.
+Logs go to `logs/scraper.log` (rotating), data to `data/orderbook.db`.
 
-### Datenqualitaet pruefen
+### Checking data quality
 
 ```powershell
 python tools\inspect_db.py
 ```
 
-Zeigt je Boerse: Zeilenzahl, Luecken im Sampling-Raster, Frische
-(`age_ms`), mittleren Spread, Anteil `stale`/`crossed`/`partial`-Flags und
-Anzahl erfolgreicher Verbindungen. Das ist der eigentliche Abnahmetest -
-er zeigt nicht nur *dass* Daten fliessen, sondern ob sie brauchbar sind.
+Shows per exchange: row count, gaps in the sampling grid, freshness
+(`age_ms`), mean spread, share of `stale`/`crossed`/`partial` flags and the
+number of successful connections. This is the real acceptance test - it shows
+not just *that* data is flowing, but whether it is usable.
 
-## Architektur (kurz)
+## Architecture (in brief)
 
-Jeder Boersen-Adapter (`src/obscraper/exchanges/`) haelt ein lebendes
-Top-N-Orderbook im Speicher - egal ob per WS-Push, WS-Snapshot+Delta oder
-REST-Polling gefuettert. Ein zentraler Sampler (`sampler.py`) greift dieses
-Buch bei jedem Wall-Clock-Tick fuer **alle** Boersen gleichzeitig ab -
-dadurch ist `ts_grid` in der Datenbank ein direkter Join-Key ueber Boersen
-hinweg. Ein Supervisor pro Boerse (`supervisor.py`) haelt die Verbindung am
-Leben, reconnectet mit Backoff und isoliert Fehler: eine haengende oder
-abstuerzende Boerse beeinflusst nie die anderen.
+Every exchange adapter (`src/obscraper/exchanges/`) keeps a live top-N order
+book in memory - no matter whether it is fed by a WS push, WS snapshot+delta,
+or REST polling. A central sampler (`sampler.py`) reads that book for **all**
+exchanges on every wall-clock tick, which makes `ts_grid` in the database a
+direct join key across exchanges. One supervisor per exchange
+(`supervisor.py`) keeps the connection alive, reconnects with backoff and
+isolates failures: a stalled or crashing exchange never affects the others.
 
-Beim Start wird - falls `connection.pick_fastest_endpoint: true` - unter
-mehreren WS-Hosts einer Boerse (z.B. Binance' vier Hosts, OKX Standard/AWS)
-die Latenz gemessen und der schnellste gewaehlt (`latency.py`).
+At startup - if `connection.pick_fastest_endpoint: true` - the latency of the
+several WS hosts an exchange offers (e.g. Binance's hosts, OKX standard/AWS)
+is measured and the fastest one is selected (`latency.py`).
 
-## Robustheit gegenueber Protokollaenderungen
+## Robustness against protocol changes
 
-Boersen aendern ihre WebSocket-Protokolle - MEXC hat 2025 den kompletten
-JSON-Stream abgeschaltet. Dagegen gibt es hier zwei Ebenen:
+Exchanges change their WebSocket protocols - MEXC shut down its entire JSON
+stream in 2025. There are two layers of defence against that:
 
-1. **Additive Aenderungen werden toleriert.** Der MEXC-Protobuf-Leser
-   (`exchanges/_protobuf.py`) ueberspringt unbekannte Felder anhand ihres
-   Wire-Typs, statt das Parsen abzubrechen. Neue Felder im Schema stoeren
-   also nicht.
-2. **Echte Breaking Changes fuehren nicht zum Datenverlust.** Scheitert ein
-   WebSocket bei `transport: auto` mehrfach hintereinander
-   (`connection.ws_failures_before_rest`), schaltet der Supervisor
-   automatisch fuer `rest_fallback_duration_s` auf REST-Polling um und
-   probiert danach erneut den WebSocket. Der Wechsel steht in jeder Zeile
-   (Spalte `transport`) und in `connection_events` - bei der Auswertung ist
-   also nachvollziehbar, welche Daten ueber welchen Weg kamen.
+1. **Additive changes are tolerated.** The MEXC protobuf reader
+   (`exchanges/_protobuf.py`) skips unknown fields based on their wire type
+   instead of aborting the parse. New fields in the schema do not disturb it.
+2. **Real breaking changes do not cause data loss.** If a WebSocket fails
+   repeatedly under `transport: auto`
+   (`connection.ws_failures_before_rest`), the supervisor switches to REST
+   polling for `rest_fallback_duration_s` and then retries the WebSocket. The
+   switch is recorded in every row (column `transport`) and in
+   `connection_events`, so during analysis it is clear which data arrived over
+   which path.
 
 ## Tests
 
@@ -98,34 +96,54 @@ JSON-Stream abgeschaltet. Dagegen gibt es hier zwei Ebenen:
 python tests\test_protobuf.py
 ```
 
-Prueft den Protobuf-Wire-Format-Leser und das MEXC-Parsing, inklusive der
-Faelle, die im Betrieb zaehlen: unbekannte Felder, abgeschnittene Frames,
-exakte Preis-Strings und Tiefenbegrenzung.
+Covers the protobuf wire-format reader and the MEXC parsing, including the
+cases that matter in production: unknown fields, truncated frames, exact price
+strings and depth truncation.
 
-## Bekannte Einschraenkungen
+## Known limitations
 
-- **MEXC** laeuft ueber Protobuf (der JSON-WebSocket wurde abgeschaltet).
-  Dekodiert wird ueber einen minimalen, abhaengigkeitsfreien Wire-Format-Leser
-  statt ueber generierte `_pb2.py`-Dateien - fuer drei Message-Typen ist das
-  schlanker und spart protoc als Build-Schritt. Referenz-Schema:
+- **MEXC** runs over protobuf (the JSON WebSocket was shut down). It is
+  decoded with a minimal, dependency-free wire-format reader instead of
+  generated `_pb2.py` files - for three message types that is leaner and
+  avoids protoc as a build step. Reference schema:
   [mexcdevelop/websocket-proto](https://github.com/mexcdevelop/websocket-proto).
-  Werden Feldnummern umnummeriert, greift der REST-Fallback.
-- **OKX/Bitget mit grosser Tiefe** und **Coinbase** pflegen das Buch lokal
-  aus Snapshot+Delta; die von der Boerse mitgelieferte Checksumme wird
-  aktuell nicht verifiziert. Fuer Forschungszwecke ausreichend, aber bei
-  Bedarf in `exchanges/okx.py` / `exchanges/bitget.py` nachruestbar.
-- **KuCoin** holt Token und WS-Host dynamisch per REST-Bootstrap
-  (`/bullet-public`); Endpoint-Racing entfaellt dadurch faktisch.
-- Manche exakten Feldnamen (v.a. BingX) koennen sich aendern. `parse()`
-  ist ueberall defensiv geschrieben - eine unerwartete Nachrichtenstruktur
-  fuehrt zu einer leeren Liste statt einer Exception; der Supervisor
-  reconnectet, der Prozess laeuft weiter.
+  If field numbers are renumbered, the REST fallback takes over.
+- **OKX/Bitget at greater depth** and **Coinbase** maintain the book locally
+  from snapshot + deltas; the checksum supplied by the exchange is currently
+  not verified. Good enough for research purposes, but it can be added in
+  `exchanges/okx.py` / `exchanges/bitget.py` if needed.
+- **KuCoin** fetches its token and WS host dynamically through a REST
+  bootstrap (`/bullet-public`); endpoint racing effectively drops out.
+- Some exact field names (notably BingX) may change. `parse()` is written
+  defensively everywhere - an unexpected message structure yields an empty
+  list rather than an exception; the supervisor reconnects and the process
+  keeps running.
 
-## Deployment auf dem eigenen Server
+## Storage sizing
 
-Das Skript ist so gebaut, dass es unbeaufsichtigt laeuft (Backoff, Watchdog,
-Fehler-Isolation, Graceful Shutdown auf SIGINT/SIGTERM). Fuer den
-Dauerbetrieb auf einem Linux-Server bietet sich eine systemd-Unit an:
+Measured with 5 pairs across 9 active exchanges at `interval_ms: 100` and
+`depth: 20`: about **400 rows/s, 1.45 kB per row, ~50 GB per day**.
+
+Roughly 52% of those rows are byte-identical duplicates, because the slower
+exchanges (HTX ~1/s, MEXC ~2/s, BingX ~1.7/s) simply do not push any faster.
+Ways to reduce the volume:
+
+| Change | Result |
+|---|---|
+| unchanged | 50 GB/day |
+| `depth: 10` | 32 GB/day |
+| `interval_ms: 1000` | 5 GB/day |
+
+Measured update rates per exchange (ETH/USDC, 90s sample): Bybit ~31 ms
+median, Bitget/Binance ~94 ms, OKX ~109 ms, KuCoin ~125 ms, Gate ~140 ms,
+MEXC ~500 ms, BingX ~594 ms, HTX ~1000 ms. Most of these are hard throttles on
+the exchange side, not a function of market activity.
+
+## Deployment on your own server
+
+The script is built to run unattended (backoff, watchdog, error isolation,
+graceful shutdown on SIGINT/SIGTERM). For continuous operation on a Linux
+server a systemd unit is a good fit:
 
 ```ini
 # /etc/systemd/system/orderbook-scraper.service
@@ -149,7 +167,6 @@ sudo systemctl enable --now orderbook-scraper
 journalctl -u orderbook-scraper -f
 ```
 
-SQLite (WAL-Modus) traegt einen Dauerbetrieb mit den hier anfallenden
-Schreibraten problemlos. Bei Bedarf laesst sich `storage/base.py`s
-Writer-Protocol um einen Postgres/TimescaleDB-Writer erweitern, ohne den
-Rest des Programms anzufassen.
+SQLite (in WAL mode) handles the write rates seen here without trouble. If
+needed, the writer protocol in `storage/base.py` can be extended with a
+Postgres/TimescaleDB writer without touching the rest of the program.

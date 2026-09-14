@@ -1,9 +1,9 @@
-"""Bybit Spot v5.
+"""Bybit spot v5.
 
-orderbook.{depth}.{symbol} liefert einen Snapshot gefolgt von Deltas, daher
-lokale Buchpflege. Der Kanal wird auf die naechstgroessere unterstuetzte
-Stufe (1/50/200) gelegt, damit auch bei depth=20 genuegend Level ankommen;
-die tatsaechlich gespeicherte Tiefe bleibt exakt die konfigurierte.
+orderbook.{depth}.{symbol} delivers a snapshot followed by deltas, hence local
+book maintenance. The channel is set to the next larger supported tier
+(1/50/200) so enough levels arrive even at depth=20; the depth actually stored
+stays exactly the configured one.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ class BybitAdapter(ExchangeAdapter):
     def __init__(self, cfg, conn) -> None:
         super().__init__(cfg, conn)
         self.sub_depth = next(
-            (d for d in _CHANNEL_DEPTHS if d >= self.effective_depth), _CHANNEL_DEPTHS[-1]
+            (d for d in _CHANNEL_DEPTHS if d >= self.effective_depth),
+            _CHANNEL_DEPTHS[-1],
         )
 
     @classmethod

@@ -1,9 +1,8 @@
-"""Lebenszyklus je Boerse: verbinden, ueberwachen, bei Fehlern neu verbinden.
+"""Per-exchange lifecycle: connect, supervise, reconnect on failure.
 
-Jede Boerse laeuft in ihrem eigenen Supervisor-Task. Kein Fehler in einem
-Adapter darf einen anderen beruehren oder den Prozess beenden - das ist der
-Kern der Fehler-Isolation, die der Nutzer fuer einen unbeaufsichtigten
-Dauerbetrieb braucht.
+Every exchange runs in its own supervisor task. No error in one adapter may
+touch another or terminate the process - that is the core of the error
+isolation needed for unattended long-running operation.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ log = logging.getLogger(__name__)
 
 
 class ExchangeSupervisor:
-    """Haelt genau einen Adapter am Laufen und meldet Ereignisse an den Writer."""
+    """Keeps exactly one adapter running and reports events to the writer."""
 
     def __init__(
         self,
@@ -50,13 +49,11 @@ class ExchangeSupervisor:
         await self._validate_symbols()
         if not self.adapter.has_active_symbols():
             log.warning(
-                "%s: kein konfiguriertes Symbol ist dort gelistet - Boerse wird "
-                "uebersprungen, es werden keine Daten erzeugt.",
+                "%s: none of the configured symbols are listed there - exchange "
+                "skipped, no data will be produced.",
                 self.adapter.name,
             )
-            self.writer.submit_event(
-                self.adapter.name, "skipped_no_listing"
-            )
+            self.writer.submit_event(self.adapter.name, "skipped_no_listing")
             return
 
         transport = self._resolve_transport()
@@ -65,19 +62,19 @@ class ExchangeSupervisor:
         elif self.cfg.transport == "auto":
             await self._run_auto()
         else:
-            # transport=ws ist eine bewusste Festlegung: kein stiller Wechsel
-            # auf REST, sondern endlose Reconnect-Versuche.
+            # transport=ws is a deliberate choice: no silent switch to REST,
+            # just endless reconnect attempts.
             await self._run_ws_supervised()
 
     async def _run_auto(self) -> None:
-        """WebSocket bevorzugt, REST als Rettungsanker.
+        """WebSocket preferred, REST as the safety net.
 
-        Scheitert der WS mehrfach hintereinander - etwa weil eine Boerse ihr
-        Protokoll geaendert hat - wird fuer eine begrenzte Zeit auf
-        REST-Polling umgeschaltet und danach erneut der WS versucht. So
-        reisst der Datensatz bei einer Protokollaenderung nicht ab, und
-        sobald die Boerse (oder ein Update dieses Scrapers) den WS wieder
-        bedienbar macht, schaltet er von selbst zurueck.
+        If the WebSocket fails repeatedly - for instance because an exchange
+        changed its protocol - polling over REST takes over for a bounded
+        window before the WebSocket is tried again. That way the dataset does
+        not break off on a protocol change, and as soon as the exchange (or an
+        update to this scraper) makes the WebSocket usable again, it switches
+        back on its own.
         """
         limit = self.app.connection.ws_failures_before_rest
         fallback_s = self.app.connection.rest_fallback_duration_s
@@ -88,8 +85,8 @@ class ExchangeSupervisor:
                 return
 
             log.warning(
-                "%s: WebSocket %dx hintereinander fehlgeschlagen - wechsle fuer "
-                "%.0fs auf REST-Polling.",
+                "%s: WebSocket failed %d times in a row - switching to REST "
+                "polling for %.0fs.",
                 self.adapter.name,
                 limit,
                 fallback_s,
@@ -97,19 +94,19 @@ class ExchangeSupervisor:
             self.writer.submit_event(
                 self.adapter.name,
                 "fallback_to_rest",
-                detail=f"nach {limit} WS-Fehlversuchen: {self.adapter.last_error}",
+                detail=f"after {limit} failed WS attempts: {self.adapter.last_error}",
             )
 
             await self._run_rest_for(fallback_s)
             if self._stop.is_set():
                 return
 
-            log.info("%s: versuche wieder WebSocket.", self.adapter.name)
+            log.info("%s: trying the WebSocket again.", self.adapter.name)
             self.writer.submit_event(self.adapter.name, "retry_ws")
             self._backoff = self.app.connection.reconnect_backoff_min_s
 
     async def _run_rest_for(self, duration_s: float) -> None:
-        """REST-Polling fuer eine begrenzte Zeit (Fallback-Fenster)."""
+        """REST polling for a bounded time (the fallback window)."""
         task = asyncio.create_task(self._run_rest_supervised())
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=duration_s)
@@ -127,15 +124,14 @@ class ExchangeSupervisor:
         for sym in self.adapter.symbols:
             if sym.listed is False:
                 log.warning(
-                    "%s: %s (%s) ist nicht gelistet - wird uebersprungen.",
+                    "%s: %s (%s) is not listed - skipping it.",
                     self.adapter.name,
                     sym.canonical,
                     sym.native,
                 )
             elif sym.listed is None:
                 log.warning(
-                    "%s: Listing von %s konnte nicht geprueft werden (%s) - "
-                    "wird trotzdem versucht.",
+                    "%s: could not verify the listing of %s (%s) - trying anyway.",
                     self.adapter.name,
                     sym.canonical,
                     sym.note,
@@ -145,8 +141,8 @@ class ExchangeSupervisor:
         wanted = self.cfg.transport
         if wanted == "ws" and not self.adapter.SUPPORTS_WS:
             log.warning(
-                "%s: transport=ws konfiguriert, aber Adapter unterstuetzt nur "
-                "REST. Verwende REST.",
+                "%s: transport=ws configured, but this adapter only supports "
+                "REST. Using REST.",
                 self.adapter.name,
             )
             return "rest"
@@ -156,21 +152,22 @@ class ExchangeSupervisor:
             return "ws" if self.adapter.SUPPORTS_WS else "rest"
         return "ws"
 
-    # -- WebSocket-Pfad ------------------------------------------------
+    # -- WebSocket path ----------------------------------------------------
 
     async def _run_ws_supervised(
         self, max_consecutive_failures: int | None = None
     ) -> bool:
-        """Haelt die WS-Verbindung am Leben.
+        """Keep the WebSocket connection alive.
 
-        Liefert True, wenn wegen ``max_consecutive_failures`` aufgegeben wurde
-        (der Aufrufer kann dann auf REST ausweichen), sonst False.
+        Returns True when it gave up because of ``max_consecutive_failures``
+        (the caller can then fall back to REST), otherwise False.
         """
         endpoint = await self._pick_endpoint()
         relatency_task: asyncio.Task | None = None
-        if self.app.connection.relatency_interval_s > 0 and len(
-            self.cfg.ws_endpoints or self.adapter.WS_ENDPOINTS
-        ) > 1:
+        if (
+            self.app.connection.relatency_interval_s > 0
+            and len(self.cfg.ws_endpoints or self.adapter.WS_ENDPOINTS) > 1
+        ):
             relatency_task = asyncio.create_task(
                 self._relatency_loop(), name=f"{self.adapter.name}-relatency"
             )
@@ -181,9 +178,7 @@ class ExchangeSupervisor:
                 current = getattr(self, "_current_endpoint", endpoint)
                 started = time.monotonic()
                 try:
-                    self.writer.submit_event(
-                        self.adapter.name, "connecting", current
-                    )
+                    self.writer.submit_event(self.adapter.name, "connecting", current)
                     watchdog = asyncio.create_task(self._staleness_watchdog())
                     try:
                         await self.adapter.run_ws(
@@ -198,7 +193,7 @@ class ExchangeSupervisor:
                     consecutive_failures += 1
                     self.adapter.last_error = f"{type(exc).__name__}: {exc}"
                     log.warning(
-                        "%s: WS-Verbindung getrennt (%s): %s",
+                        "%s: WS connection lost (%s): %s",
                         self.adapter.name,
                         current,
                         exc,
@@ -221,7 +216,7 @@ class ExchangeSupervisor:
 
                 uptime = time.monotonic() - started
                 if uptime > self.app.connection.reconnect_backoff_max_s * 2:
-                    # Lief lange stabil -> Backoff zuruecksetzen.
+                    # Ran stable for a long time -> reset the backoff.
                     self._backoff = self.app.connection.reconnect_backoff_min_s
 
                 self.adapter.reconnects += 1
@@ -230,7 +225,7 @@ class ExchangeSupervisor:
                     self._backoff * 2, self.app.connection.reconnect_backoff_max_s
                 )
                 log.info(
-                    "%s: reconnect in %.1fs (Versuch #%d)",
+                    "%s: reconnecting in %.1fs (attempt #%d)",
                     self.adapter.name,
                     delay,
                     self.adapter.reconnects,
@@ -251,12 +246,14 @@ class ExchangeSupervisor:
     async def _pick_endpoint(self) -> str:
         candidates = self.cfg.ws_endpoints or self.adapter.WS_ENDPOINTS
         if not candidates:
-            raise RuntimeError(f"{self.adapter.name}: keine WS-Endpunkte definiert.")
+            raise RuntimeError(f"{self.adapter.name}: no WS endpoints defined.")
         if not self.app.connection.pick_fastest_endpoint or len(candidates) == 1:
             self._current_endpoint = candidates[0]
             return candidates[0]
 
-        winner, results = await race_endpoints(self.adapter, self.app.connection, self.session)
+        winner, results = await race_endpoints(
+            self.adapter, self.app.connection, self.session
+        )
         for r in results:
             self.writer.submit_latency(
                 self.adapter.name,
@@ -274,9 +271,11 @@ class ExchangeSupervisor:
         while True:
             await asyncio.sleep(interval)
             try:
-                winner, results = await race_endpoints(self.adapter, self.app.connection, self.session)
+                winner, results = await race_endpoints(
+                    self.adapter, self.app.connection, self.session
+                )
             except Exception as exc:
-                log.debug("%s: Neubewertung fehlgeschlagen: %s", self.adapter.name, exc)
+                log.debug("%s: re-evaluation failed: %s", self.adapter.name, exc)
                 continue
             current = getattr(self, "_current_endpoint", None)
             if not results or winner == current:
@@ -288,16 +287,15 @@ class ExchangeSupervisor:
                 continue
             if new_score < cur_score * (1 - improve_pct / 100):
                 log.info(
-                    "%s: wechsle Endpoint %s -> %s (deutliche Verbesserung)",
+                    "%s: switching endpoint %s -> %s (clear improvement)",
                     self.adapter.name,
                     current,
                     winner,
                 )
                 self._current_endpoint = winner
-                # Der laufende run_ws-Task wird ueber die naechste
-                # Verbindungsstoerung ohnehin neu verbunden; ein sanfter
-                # Wechsel ohne Datenluecke wuerde eine zweite parallele
-                # Verbindung erfordern - fuer Forschungszwecke unnoetig.
+                # The running run_ws task will reconnect on the next connection
+                # hiccup anyway; a seamless switch without a data gap would
+                # require a second parallel connection - unnecessary here.
 
     async def _staleness_watchdog(self) -> None:
         threshold = self.app.connection.stale_after_s
@@ -306,16 +304,14 @@ class ExchangeSupervisor:
             staleness = self.adapter.staleness()
             if staleness is not None and staleness > threshold:
                 log.warning(
-                    "%s: keine Updates seit %.1fs - erzwinge Reconnect.",
+                    "%s: no updates for %.1fs - forcing a reconnect.",
                     self.adapter.name,
                     staleness,
                 )
-                self.writer.submit_event(
-                    self.adapter.name, "stale_forced_reconnect"
-                )
+                self.writer.submit_event(self.adapter.name, "stale_forced_reconnect")
                 raise RuntimeError("stale connection")
 
-    # -- REST-Pfad -------------------------------------------------------
+    # -- REST path ---------------------------------------------------------
 
     async def _run_rest_supervised(self) -> None:
         while not self._stop.is_set():
@@ -326,7 +322,7 @@ class ExchangeSupervisor:
                 raise
             except Exception as exc:
                 self.adapter.last_error = f"{type(exc).__name__}: {exc}"
-                log.warning("%s: REST-Polling-Fehler: %s", self.adapter.name, exc)
+                log.warning("%s: REST polling error: %s", self.adapter.name, exc)
                 self.writer.submit_event(
                     self.adapter.name, "rest_error", detail=str(exc)
                 )

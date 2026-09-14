@@ -1,10 +1,10 @@
-"""KuCoin Spot.
+"""KuCoin spot.
 
-KuCoin vergibt WebSocket-Endpunkte nicht statisch, sondern ueber einen
-REST-Bootstrap (POST /bullet-public), der Token, Server-URL und das
-geforderte Ping-Intervall liefert. Das Endpoint-Racing entfaellt dadurch
-faktisch (ein einzelner Kandidat) - das Bootstrap-Handshake selbst dominiert
-die Verbindungszeit ohnehin.
+KuCoin does not hand out WebSocket endpoints statically but through a REST
+bootstrap (POST /bullet-public) that returns a token, the server URL and the
+required ping interval. Endpoint racing effectively drops out as a result (a
+single candidate) - the bootstrap handshake itself dominates connection time
+anyway.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ _ids = itertools.count(1)
 
 class KucoinAdapter(ExchangeAdapter):
     name = "kucoin"
-    # Sentinel: die echte URL kommt dynamisch aus /bullet-public.
+    # Sentinel: the real URL comes dynamically from /bullet-public.
     WS_ENDPOINTS = ["kucoin-dynamic"]
     REST_BASE = "https://api.kucoin.com"
     PARTIAL_DEPTHS = [5, 50]
@@ -38,10 +38,12 @@ class KucoinAdapter(ExchangeAdapter):
         return f"{base}-{quote}".upper()
 
     async def ws_url(self, endpoint: str, session: aiohttp.ClientSession) -> str:
-        async with session.post(_BULLET, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.post(
+            _BULLET, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
             body = await resp.json(content_type=None)
         if body.get("code") != "200000":
-            raise RuntimeError(f"bullet-public fehlgeschlagen: {body}")
+            raise RuntimeError(f"bullet-public failed: {body}")
         data = body["data"]
         token = data["token"]
         server = data["instanceServers"][0]
@@ -89,9 +91,7 @@ class KucoinAdapter(ExchangeAdapter):
 
     async def fetch_listed_symbols(self, session: aiohttp.ClientSession) -> set[str]:
         data = await self.get_json(session, _SYMBOLS)
-        return {
-            d["symbol"] for d in data.get("data", []) if d.get("enableTrading")
-        }
+        return {d["symbol"] for d in data.get("data", []) if d.get("enableTrading")}
 
     async def rest_depth(
         self, session: aiohttp.ClientSession, sym: SymbolStatus

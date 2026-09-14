@@ -1,8 +1,8 @@
-"""Bitget Spot v2.
+"""Bitget spot v2.
 
-books1/books5/books15 sind feste Snapshot-Kanaele; darueber hinaus wird auf
-den inkrementellen "books"-Kanal (Snapshot + Deltas) umgeschaltet und lokal
-zusammengesetzt.
+books1/books5/books15 are fixed snapshot channels; beyond those the adapter
+switches to the incremental "books" channel (snapshot + deltas) and
+reassembles the book locally.
 """
 
 from __future__ import annotations
@@ -57,8 +57,8 @@ class BitgetAdapter(ExchangeAdapter):
         if msg["arg"].get("channel") != self.channel:
             return []
         native_symbol = msg["arg"].get("instId", "")
-        # books1/5/15 liefern bei Bitget stets action=="snapshot"; nur der
-        # volle "books"-Kanal nutzt "update" fuer Deltas.
+        # On Bitget books1/5/15 always carry action=="snapshot"; only the full
+        # "books" channel uses "update" for deltas.
         is_snapshot = msg.get("action", "snapshot") == "snapshot"
         out = []
         for entry in msg["data"]:
@@ -75,9 +75,7 @@ class BitgetAdapter(ExchangeAdapter):
 
     async def fetch_listed_symbols(self, session: aiohttp.ClientSession) -> set[str]:
         data = await self.get_json(session, _SYMBOLS)
-        return {
-            d["symbol"] for d in data.get("data", []) if d.get("status") == "online"
-        }
+        return {d["symbol"] for d in data.get("data", []) if d.get("status") == "online"}
 
     async def rest_depth(
         self, session: aiohttp.ClientSession, sym: SymbolStatus
