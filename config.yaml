@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# Orderbook-Scraper Konfiguration
+# ---------------------------------------------------------------------------
+
+general:
+  # Kanonische Schreibweise BASE/QUOTE. Die Uebersetzung in die
+  # boersen-eigene Schreibweise (ETHUSDC, ETH-USDC, ETH_USDC, ...)
+  # macht der jeweilige Adapter selbst.
+  symbols: ["ETH/USDC"]
+
+  # Sampling-Raster in Millisekunden. Der WebSocket laeuft in der Kadenz der
+  # Boerse; hier wird festgelegt, wie oft der aktuelle Buchzustand
+  # weggeschrieben wird. Alle Boersen werden auf demselben Raster abgegriffen.
+  interval_ms: 1000
+
+  # Gewuenschte Orderbook-Tiefe je Seite.
+  depth: 20
+
+  # Was tun, wenn eine Boerse genau diese Tiefe nicht anbietet?
+  #   at_least  -> naechstgroessere unterstuetzte Stufe (Default)
+  #   at_most   -> naechstkleinere Stufe
+  #   nearest   -> naechstliegende Stufe
+  depth_policy: at_least
+
+  # ws   -> nur WebSocket
+  # rest -> nur REST-Polling
+  # auto -> WebSocket bevorzugt, bei dauerhaftem Fehlschlag REST-Fallback
+  transport: auto
+
+  log_level: INFO
+
+storage:
+  backend: sqlite
+  path: ./data/orderbook.db
+  batch_size: 200
+  flush_interval_ms: 1000
+  queue_maxsize: 20000
+
+connection:
+  # Misst beim Start die Latenz aller bekannten WS-Endpunkte einer Boerse
+  # und verbindet sich mit dem schnellsten.
+  pick_fastest_endpoint: true
+  latency_probe_timeout_s: 5
+  latency_probe_rounds: 2
+  # Periodische Neubewertung (0 = aus). Gewechselt wird nur bei deutlicher
+  # Verbesserung, damit die Verbindung nicht staendig neu aufgebaut wird.
+  relatency_interval_s: 3600
+  relatency_improvement_pct: 25
+
+  reconnect_backoff_min_s: 1
+  reconnect_backoff_max_s: 60
+  # Nur bei transport: auto - scheitert der WebSocket so oft hintereinander
+  # (z.B. weil eine Boerse ihr Protokoll geaendert hat), wird fuer
+  # rest_fallback_duration_s auf REST-Polling umgeschaltet und danach der
+  # WebSocket erneut versucht. So reisst der Datensatz nie ab.
+  ws_failures_before_rest: 3
+  rest_fallback_duration_s: 600
+  # Kommt so lange kein Update, gilt das Buch als veraltet -> Zwangs-Reconnect.
+  stale_after_s: 15
+  # Veraltete Snapshots trotzdem schreiben (mit gesetztem stale-Flag)?
+  # true ist empfohlen: Luecken bleiben so im Datensatz nachvollziehbar.
+  record_stale_snapshots: true
+  ws_ping_interval_s: 20
+  rest_timeout_s: 10
+  # Statusbericht ins Log, alle N Sekunden (0 = aus).
+  health_report_interval_s: 60
+
+# Pro Boerse ueberschreibbar: enabled, depth, transport, ws_endpoints,
+# symbol_override (kanonisch -> nativ), rest_interval_ms
+exchanges:
+  binance:  { enabled: true }
+  okx:      { enabled: true }
+  bybit:    { enabled: true }
+  bitget:   { enabled: true }
+  kucoin:   { enabled: true }
+  gate:     { enabled: true }
+  htx:      { enabled: true }
+  coinbase: { enabled: true }
+  bingx:    { enabled: true }
+  # MEXC laeuft ueber den Protobuf-WebSocket (siehe exchanges/_protobuf.py).
+  # Schlaegt der fehl, greift automatisch der REST-Fallback von oben.
+  mexc:     { enabled: true }

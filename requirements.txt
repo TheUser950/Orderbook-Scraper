@@ -1,0 +1,8 @@
+websockets>=13.0
+aiohttp>=3.10
+PyYAML>=6.0
+orjson>=3.10
+
+# Optional: nur fuer den MEXC Protobuf-WebSocket noetig.
+# Ohne dieses Paket faellt MEXC automatisch auf REST-Polling zurueck.
+# protobuf>=5.27
