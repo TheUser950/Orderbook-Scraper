@@ -6,12 +6,22 @@ general:
   # Kanonische Schreibweise BASE/QUOTE. Die Uebersetzung in die
   # boersen-eigene Schreibweise (ETHUSDC, ETH-USDC, ETH_USDC, ...)
   # macht der jeweilige Adapter selbst.
-  symbols: ["ETH/USDC"]
+  symbols:
+    - "ETH/USDC"
+    - "ETH/USDT"
+    - "BTC/USDC"
+    - "STRK/USDC"
+    - "SOL/USDC"
 
   # Sampling-Raster in Millisekunden. Der WebSocket laeuft in der Kadenz der
   # Boerse; hier wird festgelegt, wie oft der aktuelle Buchzustand
   # weggeschrieben wird. Alle Boersen werden auf demselben Raster abgegriffen.
-  interval_ms: 1000
+  #
+  # 100ms ist die sinnvolle Untergrenze: Binance, OKX, Bitget, Bybit, KuCoin
+  # und Gate pushen in dieser Kadenz. MEXC (500ms), BingX (~600ms) und HTX
+  # (1000ms) pushen langsamer - deren Zeilen wiederholen sich entsprechend,
+  # erkennbar an gleichbleibender seq und steigendem age_ms.
+  interval_ms: 100
 
   # Gewuenschte Orderbook-Tiefe je Seite.
   depth: 20
