@@ -41,7 +41,11 @@ class BookState:
 
 @dataclass(frozen=True, slots=True)
 class OrderBookSnapshot:
-    """One row in the snapshots table."""
+    """One recorded row - for the snapshots table or for book_updates.
+
+    Both tables carry the same columns; only ``ts_grid`` is specific to grid
+    sampling and ``is_snapshot`` to the stream table.
+    """
 
     ts_grid: int
     ts_local: int
@@ -58,6 +62,9 @@ class OrderBookSnapshot:
     transport: str
     endpoint: str | None
     flags: int
+    # Stream mode only: was this update a full snapshot or a delta? Tells you
+    # when a locally maintained book was reset.
+    is_snapshot: bool = True
 
 
 def _to_decimal(value: str) -> Decimal:
@@ -71,11 +78,14 @@ class IncrementalBook:
     """Order book maintained locally from snapshot + deltas.
 
     Used by the exchanges that do not push a ready-made top-N (OKX, Bitget,
-    Bybit, Coinbase). Levels are kept in dicts and sorting happens deliberately
-    only on read in :meth:`top` - that is once per sampling tick rather than on
-    every incoming delta. For Coinbase, with several thousand levels and a high
-    update rate, that is the difference between "runs in the background" and
-    "eats a CPU".
+    Bybit, Coinbase). Levels are kept in dicts keyed by Decimal price, so
+    applying a delta is O(1) per level and does not re-sort anything.
+
+    Sorting happens in :meth:`top`, which the adapter calls once per incoming
+    update. For a deep book like Coinbase's that is a heap selection over
+    several thousand entries per update - noticeable but well within budget at
+    the observed rates. Deferring it to sampling time would only pay off when
+    the sampling grid is coarser than the exchange's update rate.
     """
 
     __slots__ = ("bids", "asks")

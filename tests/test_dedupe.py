@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Tests for the unchanged-row check, the heartbeat and the stream hook.
+
+Runs without a test framework and without network:  python tests/test_dedupe.py
+
+The whole point of dedupe is that dropping a row must never lose information.
+These tests pin down the cases where a row has to be written even though the
+levels look identical - above all a feed going stale, which would otherwise be
+indistinguishable from a quiet market.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from obscraper.config import ConnectionConfig, ExchangeConfig  # noqa: E402
+from obscraper.exchanges.base import BookUpdate  # noqa: E402
+from obscraper.exchanges.binance import BinanceAdapter  # noqa: E402
+from obscraper.models import FLAG_CROSSED, FLAG_STALE  # noqa: E402
+
+failures: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        print(f"  ok   {name}")
+    else:
+        print(f"  FAIL {name} {detail}")
+        failures.append(name)
+
+
+def make_adapter(
+    skip_unchanged: bool = True, heartbeat_s: float = 60.0, stale_after_s: float = 15.0
+) -> BinanceAdapter:
+    cfg = ExchangeConfig(name="binance", depth=2, symbols=["ETH/USDC"])
+    adapter = BinanceAdapter(cfg, ConnectionConfig(stale_after_s=stale_after_s))
+    adapter.skip_unchanged = skip_unchanged
+    adapter.heartbeat_ms = heartbeat_s * 1000
+    adapter.symbols[0].listed = True
+    return adapter
+
+
+def feed(adapter: BinanceAdapter, bid: str = "2500.00", ask: str = "2500.10") -> None:
+    adapter._apply(
+        BookUpdate(
+            symbol="ETHUSDC",
+            bids=[(bid, "1.0"), ("2499.00", "2.0")],
+            asks=[(ask, "1.0"), ("2501.00", "2.0")],
+        )
+    )
+
+
+def sym(adapter: BinanceAdapter):
+    return adapter.symbols[0]
+
+
+# -- Grid path ------------------------------------------------------------
+
+
+def test_unchanged_is_skipped() -> None:
+    print("\nGrid: unchanged rows:")
+    a = make_adapter()
+    feed(a)
+
+    first = a.snapshot(sym(a), 1000)
+    check("first sample is written", first is not None)
+
+    second = a.snapshot(sym(a), 1100)
+    check("second sample without update is skipped", second is None)
+    check("skip counter incremented", a.rows_skipped == 1, str(a.rows_skipped))
+
+    # A new update that produces byte-identical levels must also be skipped -
+    # the object differs, so this exercises the slow comparison path.
+    feed(a)
+    third = a.snapshot(sym(a), 1200)
+    check("identical levels from a new update are skipped", third is None)
+    check("slow path also counted", a.rows_skipped == 2, str(a.rows_skipped))
+
+    feed(a, bid="2500.50")
+    fourth = a.snapshot(sym(a), 1300)
+    check("changed levels are written", fourth is not None)
+
+
+def test_skip_can_be_disabled() -> None:
+    print("\nGrid: skip_unchanged = false:")
+    a = make_adapter(skip_unchanged=False)
+    feed(a)
+    check("first written", a.snapshot(sym(a), 1000) is not None)
+    check("duplicate written too", a.snapshot(sym(a), 1100) is not None)
+    check("nothing counted as skipped", a.rows_skipped == 0, str(a.rows_skipped))
+
+
+def test_flag_change_forces_a_row() -> None:
+    """The important one: a dead feed must not look like a quiet market."""
+    print("\nGrid: a flag change always writes:")
+    a = make_adapter(stale_after_s=0.05)
+    feed(a)
+    check("first written", a.snapshot(sym(a), 1000) is not None)
+    check("immediate duplicate skipped", a.snapshot(sym(a), 1100) is None)
+
+    # Do not touch the book, just let it age past stale_after_s.
+    import time as _time
+
+    _time.sleep(0.12)
+
+    stale_row = a.snapshot(sym(a), 1200)
+    check("row written once the book goes stale", stale_row is not None)
+    if stale_row is not None:
+        check("stale flag set", bool(stale_row.flags & FLAG_STALE), str(stale_row.flags))
+    check("still-stale duplicate skipped again", a.snapshot(sym(a), 1300) is None)
+
+
+def test_crossed_flag_is_detected() -> None:
+    print("\nGrid: crossed book:")
+    a = make_adapter()
+    a._apply(
+        BookUpdate(
+            symbol="ETHUSDC",
+            bids=[("2500.20", "1.0")],
+            asks=[("2500.10", "1.0")],  # ask below bid
+        )
+    )
+    row = a.snapshot(sym(a), 1000)
+    check("row written", row is not None)
+    if row is not None:
+        check("crossed flag set", bool(row.flags & FLAG_CROSSED), str(row.flags))
+
+
+def test_heartbeat() -> None:
+    print("\nGrid: heartbeat:")
+    a = make_adapter(heartbeat_s=0.05)
+    feed(a)
+    check("first written", a.snapshot(sym(a), 1000) is not None)
+    check("immediate duplicate skipped", a.snapshot(sym(a), 1100) is None)
+
+    import time as _time
+
+    _time.sleep(0.06)
+    check("heartbeat writes an unchanged row", a.snapshot(sym(a), 1200) is not None)
+    check("and the next one is skipped again", a.snapshot(sym(a), 1300) is None)
+
+    b = make_adapter(heartbeat_s=0)
+    feed(b)
+    b.snapshot(sym(b), 1000)
+    _time.sleep(0.06)
+    check("heartbeat_s=0 disables it", b.snapshot(sym(b), 1100) is None)
+
+
+# -- Stream path ----------------------------------------------------------
+
+
+def test_stream_hook() -> None:
+    print("\nStream: on_update hook:")
+    a = make_adapter()
+    captured = []
+    a.on_update = captured.append
+
+    feed(a)
+    check("update is emitted", len(captured) == 1, str(len(captured)))
+    if captured:
+        row = captured[0]
+        check("carries the symbol", row.symbol == "ETH/USDC", row.symbol)
+        check("ts_grid is the arrival time", row.ts_grid == row.ts_recv)
+        check("marked as a snapshot", row.is_snapshot is True)
+
+    feed(a)  # identical levels
+    check("unchanged update is not emitted", len(captured) == 1, str(len(captured)))
+
+    feed(a, ask="2500.99")
+    check("changed update is emitted", len(captured) == 2, str(len(captured)))
+
+
+def test_stream_records_delta_flag() -> None:
+    print("\nStream: snapshot vs delta:")
+    a = make_adapter()
+    captured = []
+    a.on_update = captured.append
+    a._apply(
+        BookUpdate(
+            symbol="ETHUSDC",
+            bids=[("2500.00", "1.0")],
+            asks=[("2500.10", "1.0")],
+            is_snapshot=False,
+        )
+    )
+    check("emitted", len(captured) == 1)
+    if captured:
+        check("is_snapshot=False preserved", captured[0].is_snapshot is False)
+
+
+def test_grid_and_stream_are_independent() -> None:
+    """In 'both' mode the two paths must not consume each other's state."""
+    print("\nGrid and stream tracked separately:")
+    a = make_adapter()
+    captured = []
+    a.on_update = captured.append
+
+    feed(a)
+    check("stream got the update", len(captured) == 1, str(len(captured)))
+    check("grid still writes its first row", a.snapshot(sym(a), 1000) is not None)
+
+    feed(a, bid="2501.00")
+    check("stream got the change", len(captured) == 2, str(len(captured)))
+    check("grid writes the change too", a.snapshot(sym(a), 1100) is not None)
+    check("grid duplicate still skipped", a.snapshot(sym(a), 1200) is None)
+
+
+def test_unlisted_symbol_is_not_emitted() -> None:
+    print("\nStream: unlisted symbols:")
+    a = make_adapter()
+    a.symbols[0].listed = False
+    captured = []
+    a.on_update = captured.append
+    feed(a)
+    check("nothing emitted for an unlisted pair", captured == [], str(len(captured)))
+
+
+if __name__ == "__main__":
+    test_unchanged_is_skipped()
+    test_skip_can_be_disabled()
+    test_flag_change_forces_a_row()
+    test_crossed_flag_is_detected()
+    test_heartbeat()
+    test_stream_hook()
+    test_stream_records_delta_flag()
+    test_grid_and_stream_are_independent()
+    test_unlisted_symbol_is_not_emitted()
+
+    print()
+    if failures:
+        print(f"{len(failures)} test(s) failed: {', '.join(failures)}")
+        raise SystemExit(1)
+    print("All tests passed.")

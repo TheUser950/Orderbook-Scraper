@@ -147,6 +147,13 @@ async def run_forever(app: AppConfig, duration: float | None) -> None:
             for adapter, ex_cfg in zip(adapters, app.enabled_exchanges())
         ]
 
+        # Recording policy lives on the adapters, since they own the hot path.
+        for adapter in adapters:
+            adapter.skip_unchanged = app.storage.skip_unchanged
+            adapter.heartbeat_ms = app.storage.heartbeat_s * 1000
+            if app.general.writes_stream():
+                adapter.on_update = writer.submit_update
+
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
 
@@ -169,7 +176,8 @@ async def run_forever(app: AppConfig, duration: float | None) -> None:
             asyncio.create_task(sup.run(), name=f"sup-{sup.adapter.name}")
             for sup in supervisors
         ]
-        tasks.append(asyncio.create_task(sampler.run(stop), name="sampler"))
+        if app.general.writes_grid():
+            tasks.append(asyncio.create_task(sampler.run(stop), name="sampler"))
         tasks.append(
             asyncio.create_task(
                 health_loop(
@@ -188,10 +196,15 @@ async def run_forever(app: AppConfig, duration: float | None) -> None:
             tasks.append(asyncio.create_task(_timer(), name="duration-timer"))
 
         log.info(
-            "Scraper running: %d exchanges, interval=%dms, depth=%d, symbols=%s",
+            "Scraper running: %d exchanges, mode=%s%s, depth=%d, "
+            "skip_unchanged=%s, symbols=%s",
             len(adapters),
-            app.general.interval_ms,
+            app.general.mode,
+            f", interval={app.general.interval_ms}ms"
+            if app.general.writes_grid()
+            else "",
             app.general.depth,
+            app.storage.skip_unchanged,
             ", ".join(app.general.symbols),
         )
 

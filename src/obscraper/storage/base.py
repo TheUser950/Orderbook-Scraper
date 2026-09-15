@@ -16,7 +16,13 @@ class Writer(Protocol):
         """Create the schema, register the run and return the run_id."""
         ...
 
-    def submit_snapshot(self, snap: OrderBookSnapshot) -> None: ...
+    def submit_snapshot(self, snap: OrderBookSnapshot) -> None:
+        """A grid-sampled row -> snapshots table."""
+        ...
+
+    def submit_update(self, snap: OrderBookSnapshot) -> None:
+        """A single incoming update -> book_updates table (stream mode)."""
+        ...
 
     def submit_event(
         self,

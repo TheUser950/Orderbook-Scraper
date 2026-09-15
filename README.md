@@ -20,12 +20,49 @@ pip install -r requirements.txt
 
 On Linux the activation is `source .venv/bin/activate`.
 
+## Recording modes
+
+`general.mode` decides how data is recorded:
+
+| Mode | Table | What it gives you |
+|---|---|---|
+| `grid` | `snapshots` | The current book sampled every `interval_ms`. Rows are time-aligned across exchanges, so `ts_grid` is a direct join key. |
+| `stream` | `book_updates` | Every incoming update written as it arrives, with its exact arrival time. Needs resampling before exchanges can be compared. |
+| `both` | both | Both at once, into their two separate tables. |
+
+Stream mode records a **top-N row per update**, not raw deltas. That is not a
+shortcut: only OKX, Bitget, Bybit and Coinbase send true deltas at all —
+Binance, HTX, MEXC, Gate, KuCoin and BingX push a complete top-N snapshot on
+every message. A raw-delta table could not be filled uniformly. The
+`is_snapshot` column records which kind an update was, so you can see when a
+locally maintained book was reset.
+
+### Skipping unchanged rows
+
+With `storage.skip_unchanged: true` (the default) a row is only written when
+the book actually changed since the last one for that exchange/symbol. This is
+information-preserving: a missing row means "same as the previous one", so
+forward-fill when analysing.
+
+It matters a lot. At a 100 ms grid the slow exchanges push far less often than
+they are sampled — measured over 120 s, dedupe cut the dataset from 47,656 to
+18,264 rows, **50.2 GB/day down to 20.9 GB/day**.
+
+Two details make it safe:
+
+- The comparison includes the quality flags, not just the levels. A feed that
+  goes stale keeps identical levels but still produces a row — otherwise a dead
+  feed would be indistinguishable from a quiet market.
+- `storage.heartbeat_s` (default 60) writes at least one row per symbol per
+  minute regardless. So any gap longer than that means something was genuinely
+  wrong, and forward-fill distance is bounded.
+
 ## Configuration
 
 Everything relevant lives in `config.yaml`: symbols (`BASE/QUOTE`, e.g.
-`ETH/USDC`), sampling interval, desired order book depth, transport
-(`ws` / `rest` / `auto`) and a per-exchange on/off switch. All options are
-commented in the file itself.
+`ETH/USDC`), recording mode, sampling interval, desired order book depth,
+transport (`ws` / `rest` / `auto`) and a per-exchange on/off switch. All
+options are commented in the file itself.
 
 Important: **not every exchange lists every pair.** This is checked against
 each exchange's instrument list at startup (and in `--dry-run`); unlisted
@@ -94,11 +131,18 @@ stream in 2025. There are two layers of defence against that:
 
 ```powershell
 python tests\test_protobuf.py
+python tests\test_dedupe.py
 ```
 
-Covers the protobuf wire-format reader and the MEXC parsing, including the
-cases that matter in production: unknown fields, truncated frames, exact price
-strings and depth truncation.
+`test_protobuf.py` covers the protobuf wire-format reader and the MEXC
+parsing, including the cases that matter in production: unknown fields,
+truncated frames, exact price strings and depth truncation.
+
+`test_dedupe.py` covers the unchanged-row check and the stream hook, pinning
+down the cases where a row must be written even though the levels look
+identical — above all a feed going stale.
+
+Both run offline in under a second.
 
 ## Known limitations
 
@@ -121,18 +165,24 @@ strings and depth truncation.
 
 ## Storage sizing
 
-Measured with 5 pairs across 9 active exchanges at `interval_ms: 100` and
-`depth: 20`: about **400 rows/s, 1.45 kB per row, ~50 GB per day**.
+All figures measured over 120 s with 5 pairs, `depth: 20` and
+`interval_ms: 100` (41 active exchange/pair combinations, ~1.45 kB per row):
 
-Roughly 52% of those rows are byte-identical duplicates, because the slower
-exchanges (HTX ~1/s, MEXC ~2/s, BingX ~1.7/s) simply do not push any faster.
-Ways to reduce the volume:
+| Configuration | Rows | Per day |
+|---|---|---|
+| `grid`, no dedupe | 47,656 | 50.2 GB |
+| **`grid` + dedupe (current default)** | **18,264** | **20.9 GB** |
+| `stream` + dedupe | 24,202 | 25.1 GB |
+| `grid` + dedupe, `depth: 10` | — | ~13 GB |
 
-| Change | Result |
-|---|---|
-| unchanged | 50 GB/day |
-| `depth: 10` | 32 GB/day |
-| `interval_ms: 1000` | 5 GB/day |
+Further reductions: `depth: 10` removes roughly 36% of each row (the level
+JSON is 72% of it), and `interval_ms: 1000` cuts the grid volume by about 10x.
+
+Measured update rates per exchange (ETH/USDC, 90 s sample): Bybit ~31 ms
+median, Bitget/Binance ~94 ms, OKX ~109 ms, KuCoin ~125 ms, Gate ~140 ms,
+MEXC ~500 ms, BingX ~594 ms, HTX ~1000 ms. Most of these are hard throttles on
+the exchange side, not a function of market activity — which is exactly why
+sampling at 100 ms produced so many duplicates before dedupe.
 
 Measured update rates per exchange (ETH/USDC, 90s sample): Bybit ~31 ms
 median, Bitget/Binance ~94 ms, OKX ~109 ms, KuCoin ~125 ms, Gate ~140 ms,

@@ -39,8 +39,8 @@ def report(adapters: list[ExchangeAdapter], sampler: Sampler) -> None:
         lines.append(
             f"  {a.name:10s} {'UP  ' if a.connected else 'DOWN'} "
             f"transport={a.transport:4s} depth={a.effective_depth:<3d} "
-            f"msgs={a.messages:<8d} reconnects={a.reconnects:<3d} "
-            f"last_update={stale_str:<8s} "
+            f"msgs={a.messages:<8d} skipped={a.rows_skipped:<8d} "
+            f"reconnects={a.reconnects:<3d} last_update={stale_str:<8s} "
             f"{('err=' + a.last_error) if a.last_error else ''}"
         )
     log.info("\n".join(lines))

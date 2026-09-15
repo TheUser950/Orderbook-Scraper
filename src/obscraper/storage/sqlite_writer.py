@@ -18,7 +18,7 @@ from ..models import OrderBookSnapshot, now_ms
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -55,9 +55,36 @@ CREATE TABLE IF NOT EXISTS snapshots (
     flags           INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_snap
-    ON snapshots(exchange, symbol, ts_grid);
+-- run_id is part of the key: two runs restarted within the same grid tick are
+-- distinct observations, and without it the second would be silently dropped
+-- by INSERT OR IGNORE. Schema v1 had it without run_id; dropping that is safe
+-- because the new key is a superset of the old one.
+DROP INDEX IF EXISTS ux_snap;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_snap_run
+    ON snapshots(run_id, exchange, symbol, ts_grid);
 CREATE INDEX IF NOT EXISTS ix_snap_grid ON snapshots(ts_grid);
+
+-- Stream mode. Deliberately not part of snapshots: this is an event log, not
+-- a grid, and two updates for one symbol can land in the same millisecond -
+-- a unique index on time would silently drop them.
+CREATE TABLE IF NOT EXISTS book_updates (
+    id              INTEGER PRIMARY KEY,
+    run_id          INTEGER,
+    ts_recv         INTEGER NOT NULL,
+    ts_exchange     INTEGER,
+    exchange        TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    exchange_symbol TEXT    NOT NULL,
+    depth           INTEGER NOT NULL,
+    bids            TEXT    NOT NULL,
+    asks            TEXT    NOT NULL,
+    seq             INTEGER,
+    transport       TEXT    NOT NULL,
+    endpoint        TEXT,
+    flags           INTEGER NOT NULL DEFAULT 0,
+    is_snapshot     INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS ix_upd ON book_updates(exchange, symbol, ts_recv);
 
 CREATE TABLE IF NOT EXISTS connection_events (
     id       INTEGER PRIMARY KEY,
@@ -100,9 +127,16 @@ INSERT INTO endpoint_latency
 VALUES (?,?,?,?,?,?,?)
 """
 
+_UPD_SQL = """
+INSERT INTO book_updates
+    (run_id, ts_recv, ts_exchange, exchange, symbol, exchange_symbol, depth,
+     bids, asks, seq, transport, endpoint, flags, is_snapshot)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+"""
+
 _SENTINEL = object()
 
-SNAP, EVENT, LAT = 0, 1, 2
+SNAP, EVENT, LAT, UPD = 0, 1, 2, 3
 
 
 class SqliteWriter:
@@ -200,6 +234,29 @@ class SqliteWriter:
             )
         )
 
+    def submit_update(self, snap: OrderBookSnapshot) -> None:
+        self._put(
+            (
+                UPD,
+                (
+                    self.run_id,
+                    snap.ts_recv,
+                    snap.ts_exchange,
+                    snap.exchange,
+                    snap.symbol,
+                    snap.exchange_symbol,
+                    snap.depth,
+                    snap.bids_json,
+                    snap.asks_json,
+                    snap.seq,
+                    snap.transport,
+                    snap.endpoint,
+                    snap.flags,
+                    int(snap.is_snapshot),
+                ),
+            )
+        )
+
     def submit_event(
         self,
         exchange: str,
@@ -292,6 +349,7 @@ class SqliteWriter:
         if not batch or self._conn is None:
             return
         snaps = [row for kind, row in batch if kind == SNAP]
+        updates = [row for kind, row in batch if kind == UPD]
         events = [row for kind, row in batch if kind == EVENT]
         lats = [row for kind, row in batch if kind == LAT]
 
@@ -302,6 +360,8 @@ class SqliteWriter:
             try:
                 if snaps:
                     conn.executemany(_SNAP_SQL, snaps)
+                if updates:
+                    conn.executemany(_UPD_SQL, updates)
                 if events:
                     conn.executemany(_EVENT_SQL, events)
                 if lats:
@@ -315,7 +375,7 @@ class SqliteWriter:
 
         try:
             await asyncio.to_thread(_write)
-            self.written += len(snaps)
+            self.written += len(snaps) + len(updates)
         except sqlite3.Error as exc:
             self.dropped += len(batch)
             log.error("SQLite write error, %d rows lost: %s", len(batch), exc)

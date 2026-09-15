@@ -16,6 +16,7 @@ import logging
 import time
 import zlib
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +58,15 @@ class SymbolStatus:
     native: str
     listed: bool | None = None  # None = not checked
     note: str = ""
+
+
+@dataclass(slots=True)
+class _LastWritten:
+    """What was last written for one symbol, for the unchanged-row check."""
+
+    state: BookState  # kept by reference, for the identity fast path
+    flags: int
+    ts: int
 
 
 def parse_levels(raw: Any, limit: int | None = None) -> list[Level]:
@@ -126,6 +136,19 @@ class ExchangeAdapter(ABC):
         self.reconnects = 0
         self.messages = 0
         self.last_error: str | None = None
+
+        # Set by run.py when stream mode is active. Left as None otherwise, so
+        # adapters stay unaware of the writer exactly as before.
+        self.on_update: Callable[[OrderBookSnapshot], None] | None = None
+        self._by_canonical: dict[str, SymbolStatus] = {
+            s.canonical: s for s in self.symbols
+        }
+
+        # Grid and stream keep separate state: in "both" mode they write to
+        # different tables at different moments.
+        self._last_grid: dict[str, _LastWritten] = {}
+        self._last_stream: dict[str, _LastWritten] = {}
+        self.rows_skipped = 0
 
     # -- To be implemented by subclasses -----------------------------------
 
@@ -368,7 +391,7 @@ class ExchangeAdapter(ABC):
             bids = tuple(upd.bids[: self.effective_depth])
             asks = tuple(upd.asks[: self.effective_depth])
 
-        self.books[canonical] = BookState(
+        state = BookState(
             bids=bids,
             asks=asks,
             ts_recv=now_ms(),
@@ -377,20 +400,42 @@ class ExchangeAdapter(ABC):
             transport=self.transport,
             endpoint=self.endpoint,
         )
+        self.books[canonical] = state
         self.last_update_mono[canonical] = time.monotonic()
 
-    # -- Read-out by the sampler ------------------------------------------
+        if self.on_update is not None:
+            self._emit_stream_row(canonical, state, upd.is_snapshot)
 
-    def snapshot(self, sym: SymbolStatus, ts_grid: int) -> OrderBookSnapshot | None:
-        state = self.books.get(sym.canonical)
-        if state is None:
-            return None
+    def _emit_stream_row(
+        self, canonical: str, state: BookState, is_snapshot: bool
+    ) -> None:
+        """Stream mode: hand this update straight to the writer."""
+        sym = self._by_canonical.get(canonical)
+        if sym is None or sym.listed is False:
+            return
+        flags = self._flags_for(state, state.ts_recv)
+        if flags is None:
+            return
+        if self._is_unchanged(self._last_stream, canonical, state, flags, state.ts_recv):
+            return
+        self._last_stream[canonical] = _LastWritten(state, flags, state.ts_recv)
+        self.on_update(
+            self._make_row(
+                sym,
+                state,
+                ts_grid=state.ts_recv,
+                ts_local=state.ts_recv,
+                flags=flags,
+                is_snapshot=is_snapshot,
+            )
+        )
 
-        ts_local = now_ms()
-        age_ms = max(0, ts_local - state.ts_recv)
+    # -- Recording policy --------------------------------------------------
 
+    def _flags_for(self, state: BookState, ts_local: int) -> int | None:
+        """Quality flags for this state, or None if it must not be recorded."""
         flags = 0
-        if age_ms > self.conn.stale_after_s * 1000:
+        if (ts_local - state.ts_recv) > self.conn.stale_after_s * 1000:
             if not self.conn.record_stale_snapshots:
                 return None
             flags |= FLAG_STALE
@@ -401,13 +446,57 @@ class ExchangeAdapter(ABC):
             or len(state.asks) < self.effective_depth
         ):
             flags |= FLAG_PARTIAL
+        return flags
 
+    def _is_unchanged(
+        self,
+        tracker: dict[str, _LastWritten],
+        canonical: str,
+        state: BookState,
+        flags: int,
+        ts: int,
+    ) -> bool:
+        """True when this row would duplicate the last one written.
+
+        Compares levels *and* flags: a book that goes stale keeps identical
+        levels but must still produce a row, otherwise a dead feed would look
+        exactly like a quiet market.
+        """
+        if not self.skip_unchanged:
+            return False
+        last = tracker.get(canonical)
+        if last is None or last.flags != flags:
+            return False
+
+        # Adapters assign a fresh BookState on every update, so an untouched
+        # book is still the identical object - settles the common case in O(1)
+        # and skips the two orjson.dumps() calls entirely.
+        if state is not last.state and (
+            state.bids != last.state.bids or state.asks != last.state.asks
+        ):
+            return False
+
+        if self.heartbeat_ms and (ts - last.ts) >= self.heartbeat_ms:
+            return False  # heartbeat due: write it anyway
+
+        self.rows_skipped += 1
+        return True
+
+    def _make_row(
+        self,
+        sym: SymbolStatus,
+        state: BookState,
+        ts_grid: int,
+        ts_local: int,
+        flags: int,
+        is_snapshot: bool = True,
+    ) -> OrderBookSnapshot:
         return OrderBookSnapshot(
             ts_grid=ts_grid,
             ts_local=ts_local,
             ts_exchange=state.ts_exchange,
             ts_recv=state.ts_recv,
-            age_ms=age_ms,
+            age_ms=max(0, ts_local - state.ts_recv),
             exchange=self.name,
             symbol=sym.canonical,
             exchange_symbol=sym.native,
@@ -418,7 +507,29 @@ class ExchangeAdapter(ABC):
             transport=state.transport,
             endpoint=state.endpoint,
             flags=flags,
+            is_snapshot=is_snapshot,
         )
+
+    # Recording policy, set from StorageConfig by run.py.
+    skip_unchanged: bool = True
+    heartbeat_ms: float = 60_000.0
+
+    # -- Read-out by the sampler ------------------------------------------
+
+    def snapshot(self, sym: SymbolStatus, ts_grid: int) -> OrderBookSnapshot | None:
+        state = self.books.get(sym.canonical)
+        if state is None:
+            return None
+
+        ts_local = now_ms()
+        flags = self._flags_for(state, ts_local)
+        if flags is None:
+            return None
+        if self._is_unchanged(self._last_grid, sym.canonical, state, flags, ts_local):
+            return None
+
+        self._last_grid[sym.canonical] = _LastWritten(state, flags, ts_local)
+        return self._make_row(sym, state, ts_grid, ts_local, flags)
 
     # -- Symbol validation -------------------------------------------------
 

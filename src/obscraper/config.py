@@ -17,6 +17,7 @@ import yaml
 TRANSPORTS = ("ws", "rest", "auto")
 DEPTH_POLICIES = ("at_least", "at_most", "nearest")
 BACKENDS = ("sqlite",)
+MODES = ("grid", "stream", "both")
 
 
 class ConfigError(Exception):
@@ -26,11 +27,21 @@ class ConfigError(Exception):
 @dataclass(slots=True)
 class GeneralConfig:
     symbols: list[str] = field(default_factory=lambda: ["ETH/USDC"])
+    # grid   -> sample every interval_ms into the snapshots table
+    # stream -> write every incoming update into the book_updates table
+    # both   -> both at once, into their two separate tables
+    mode: str = "grid"
     interval_ms: int = 1000
     depth: int = 20
     depth_policy: str = "at_least"
     transport: str = "auto"
     log_level: str = "INFO"
+
+    def writes_grid(self) -> bool:
+        return self.mode in ("grid", "both")
+
+    def writes_stream(self) -> bool:
+        return self.mode in ("stream", "both")
 
 
 @dataclass(slots=True)
@@ -40,6 +51,11 @@ class StorageConfig:
     batch_size: int = 200
     flush_interval_ms: int = 1000
     queue_maxsize: int = 20000
+    # Do not write a row when the book has not changed since the last one.
+    skip_unchanged: bool = True
+    # ... but write at least one row per symbol per this many seconds anyway,
+    # so a gap in the data is unambiguous. 0 disables the heartbeat.
+    heartbeat_s: float = 60.0
 
 
 @dataclass(slots=True)
@@ -224,6 +240,10 @@ def _validate_general(g: GeneralConfig) -> None:
                 f"Symbol '{sym}' must be given in canonical BASE/QUOTE form, "
                 f"e.g. 'ETH/USDC'."
             )
+    if g.mode not in MODES:
+        raise ConfigError(
+            f"general.mode = '{g.mode}' is invalid. Allowed: {', '.join(MODES)}"
+        )
     if g.interval_ms < 50:
         raise ConfigError("general.interval_ms must be at least 50.")
     if g.depth < 1:
@@ -250,6 +270,8 @@ def _validate_storage(s: StorageConfig) -> None:
         raise ConfigError("storage.batch_size must be >= 1.")
     if s.queue_maxsize < 100:
         raise ConfigError("storage.queue_maxsize must be >= 100.")
+    if s.heartbeat_s < 0:
+        raise ConfigError("storage.heartbeat_s must be >= 0 (0 disables it).")
 
 
 def _validate_connection(c: ConnectionConfig) -> None:

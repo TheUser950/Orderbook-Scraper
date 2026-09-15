@@ -3,6 +3,16 @@
 # ---------------------------------------------------------------------------
 
 general:
+  # How data is recorded:
+  #   grid   -> sample the current book every interval_ms  -> snapshots table
+  #   stream -> write every incoming update as it arrives  -> book_updates table
+  #   both   -> both at once, into their two separate tables
+  #
+  # grid gives rows that are time-aligned across exchanges, so ts_grid is a
+  # direct join key. stream keeps the exact arrival time of every update but
+  # needs resampling before exchanges can be compared.
+  mode: grid
+
   # Canonical BASE/QUOTE spelling. Translating into each exchange's own
   # spelling (ETHUSDC, ETH-USDC, ETH_USDC, ...) is the adapter's job.
   symbols:
@@ -44,6 +54,19 @@ storage:
   batch_size: 200
   flush_interval_ms: 1000
   queue_maxsize: 20000
+
+  # Do not write a row when the book has not changed since the last one for
+  # that exchange/symbol. Information-preserving: a missing row means "same as
+  # the previous one", so forward-fill when analysing. At a 100ms grid this
+  # removes roughly half of all rows, because HTX, MEXC and BingX push far
+  # more slowly than we sample.
+  skip_unchanged: true
+
+  # ... but write at least one row per symbol per this many seconds even when
+  # nothing changed. Keeps gaps unambiguous (a longer gap means something was
+  # genuinely wrong, not just a quiet market) and bounds how far you ever
+  # forward-fill. 0 disables it.
+  heartbeat_s: 60
 
 connection:
   # Measures the latency of all known WS endpoints of an exchange at startup
