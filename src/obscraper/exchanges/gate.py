@@ -11,10 +11,18 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    normalise_side,
+    parse_levels,
+)
 
 _PAIRS = "https://api.gateio.ws/api/v4/spot/currency_pairs"
 _ORDERBOOK = "https://api.gateio.ws/api/v4/spot/order_book"
+_TRADES = "https://api.gateio.ws/api/v4/spot/trades"
 _PARTIAL_DEPTHS = [5, 10, 20, 50, 100]
 
 
@@ -42,6 +50,33 @@ class GateAdapter(ExchangeAdapter):
             }
             for s in self.symbols
         ]
+
+    def trade_subscribe_payloads(self) -> list[Any]:
+        return [
+            {
+                "time": int(time.time()),
+                "channel": "spot.trades",
+                "event": "subscribe",
+                "payload": [s.native for s in self.symbols],
+            }
+        ]
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        if not isinstance(msg, dict) or msg.get("channel") != "spot.trades":
+            return []
+        if msg.get("event") != "update":
+            return []
+        result = msg.get("result")
+        rows = result if isinstance(result, list) else [result]
+        return [_trade(e) for e in rows if isinstance(e, dict)]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        rows = await self.get_json(
+            session, _TRADES, params={"currency_pair": sym.native, "limit": "100"}
+        )
+        return [_trade(e) for e in rows]
 
     def keepalive_payload(self) -> Any | None:
         return {"time": int(time.time()), "channel": "spot.ping"}
@@ -83,6 +118,25 @@ class GateAdapter(ExchangeAdapter):
             asks=parse_levels(data.get("asks"), self.effective_depth),
             seq=data.get("id"),
         )
+
+
+def _trade(e: dict) -> TradeUpdate:
+    """Gate's `side` is the taker side already.
+
+    `create_time_ms` is a string with a fractional part on this endpoint, so it
+    is truncated at the decimal point before converting.
+    """
+    raw = e.get("side")
+    ts = e.get("create_time_ms") or e.get("create_time")
+    return TradeUpdate(
+        symbol=e.get("currency_pair", ""),
+        price=str(e.get("price")),
+        qty=str(e.get("amount")),
+        trade_id=str(e.get("id")) if e.get("id") is not None else None,
+        ts_exchange=_to_ms(str(ts).split(".")[0] if ts is not None else None),
+        side=normalise_side(raw),
+        raw_side=raw,
+    )
 
 
 def _to_ms(value: Any) -> int | None:

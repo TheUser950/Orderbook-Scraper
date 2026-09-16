@@ -218,6 +218,109 @@ def test_unlisted_symbol_is_not_emitted() -> None:
     check("nothing emitted for an unlisted pair", captured == [], str(len(captured)))
 
 
+# -- Regressions ----------------------------------------------------------
+
+
+def test_bingx_ask_ordering() -> None:
+    """BingX sends asks worst-price-first; sort them before truncating.
+
+    Confirmed against the live feed: bids arrive descending as usual, but so do
+    asks, which puts the best ask last. Truncating first would keep the worst
+    levels and throw the best ones away.
+    """
+    print("\nRegression: BingX ask ordering:")
+    from obscraper.exchanges.bingx import BingXAdapter
+
+    # depth 5 is one of BingX's supported tiers, so effective_depth stays 5;
+    # feeding 6 levels per side makes truncation actually bite.
+    cfg = ExchangeConfig(name="bingx", depth=5, symbols=["ETH/USDC"])
+    a = BingXAdapter(cfg, ConnectionConfig())
+    check("effective depth as configured", a.effective_depth == 5, str(a.effective_depth))
+
+    msg = {
+        "dataType": "ETH-USDC@depth20",
+        "data": {
+            "bids": [
+                ["2408.13", "1"],
+                ["2407.53", "2"],
+                ["2407.41", "3"],
+                ["2407.00", "4"],
+                ["2406.50", "5"],
+                ["2385.31", "6"],
+            ],
+            "asks": [
+                ["2429.57", "1"],
+                ["2427.16", "2"],
+                ["2424.71", "3"],
+                ["2420.00", "4"],
+                ["2410.00", "5"],
+                ["2408.15", "6"],
+            ],
+        },
+    }
+    upd = a.parse(msg)[0]
+    bid_px = [float(p) for p, _ in upd.bids]
+    ask_px = [float(p) for p, _ in upd.asks]
+    check("bids descending", bid_px == sorted(bid_px, reverse=True), str(bid_px))
+    check("asks ascending", ask_px == sorted(ask_px), str(ask_px))
+    check("best ask survives truncation", ask_px[0] == 2408.15, str(ask_px))
+    check(
+        "truncated to effective depth",
+        len(upd.asks) == 5 and len(upd.bids) == 5,
+        f"{len(upd.bids)} bids / {len(upd.asks)} asks",
+    )
+    check(
+        "worst ask is the one dropped, not the best",
+        2429.57 not in ask_px,
+        str(ask_px),
+    )
+    check(
+        "resulting spread is sane",
+        round(ask_px[0] - bid_px[0], 6) == 0.02,
+        str(ask_px[0] - bid_px[0]),
+    )
+
+
+def test_grid_timestamps_are_absolute() -> None:
+    """ts_grid must be a whole multiple of interval_ms.
+
+    Otherwise every run gets its own offset and rows from two runs cannot be
+    joined on ts_grid - which is the entire point of grid mode.
+    """
+    print("\nRegression: grid timestamps:")
+    import asyncio as _asyncio
+
+    from obscraper.sampler import Sampler
+
+    for interval in (100, 250, 1000):
+        captured: list[int] = []
+
+        class _Collector(Sampler):
+            def _sample_once(self, ts_grid: int) -> None:
+                captured.append(ts_grid)
+
+        async def drive() -> None:
+            s = _Collector([], None, interval)
+            stop = _asyncio.Event()
+            task = _asyncio.create_task(s.run(stop))
+            await _asyncio.sleep(interval / 1000 * 3.5)
+            stop.set()
+            await task
+
+        _asyncio.run(drive())
+        steps = [b - a for a, b in zip(captured, captured[1:])]
+        check(
+            f"interval={interval}ms: every ts_grid lands on the grid",
+            len(captured) >= 2 and all(ts % interval == 0 for ts in captured),
+            str(captured[:4]),
+        )
+        check(
+            f"interval={interval}ms: ticks exactly one interval apart",
+            bool(steps) and all(s == interval for s in steps),
+            str(steps),
+        )
+
+
 if __name__ == "__main__":
     test_unchanged_is_skipped()
     test_skip_can_be_disabled()
@@ -228,6 +331,8 @@ if __name__ == "__main__":
     test_stream_records_delta_flag()
     test_grid_and_stream_are_independent()
     test_unlisted_symbol_is_not_emitted()
+    test_bingx_ask_ordering()
+    test_grid_timestamps_are_absolute()
 
     print()
     if failures:

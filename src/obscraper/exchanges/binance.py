@@ -12,10 +12,18 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    parse_levels,
+    taker_from_buyer_maker,
+)
 
 _EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 _DEPTH = "https://api.binance.com/api/v3/depth"
+_TRADES = "https://api.binance.com/api/v3/trades"
 
 
 class BinanceAdapter(ExchangeAdapter):
@@ -35,10 +43,15 @@ class BinanceAdapter(ExchangeAdapter):
         return f"{base}{quote}".upper()
 
     async def ws_url(self, endpoint: str, session: aiohttp.ClientSession) -> str:
-        streams = "/".join(
-            f"{s.native.lower()}@depth{self.effective_depth}@100ms" for s in self.symbols
-        )
-        return f"{endpoint}/stream?streams={streams}"
+        # Binance selects streams through the URL rather than a subscribe
+        # message, so the trade streams have to be named here too.
+        streams = [
+            f"{s.native.lower()}@depth{self.effective_depth}@100ms"
+            for s in self.symbols
+        ]
+        if self.collect_trades:
+            streams += [f"{s.native.lower()}@trade" for s in self.symbols]
+        return f"{endpoint}/stream?streams={'/'.join(streams)}"
 
     def parse(self, msg: Any) -> list[BookUpdate]:
         if not isinstance(msg, dict):
@@ -62,6 +75,23 @@ class BinanceAdapter(ExchangeAdapter):
             )
         ]
 
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        if not isinstance(msg, dict):
+            return []
+        stream = msg.get("stream") or ""
+        data = msg.get("data")
+        if not stream.endswith("@trade") or not isinstance(data, dict):
+            return []
+        return [_trade(data, stream.split("@", 1)[0].upper())]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        rows = await self.get_json(
+            session, _TRADES, params={"symbol": sym.native, "limit": "100"}
+        )
+        return [_trade(r, sym.native, rest=True) for r in rows]
+
     async def fetch_listed_symbols(self, session: aiohttp.ClientSession) -> set[str]:
         data = await self.get_json(session, _EXCHANGE_INFO)
         return {
@@ -82,3 +112,18 @@ class BinanceAdapter(ExchangeAdapter):
             asks=parse_levels(data.get("asks"), self.effective_depth),
             seq=data.get("lastUpdateId"),
         )
+
+
+def _trade(r: dict, native_symbol: str, rest: bool = False) -> TradeUpdate:
+    """Binance reports `m` = "the buyer was the maker", so the taker is the
+    opposite side. Same field name in the WS payload and the REST response."""
+    buyer_is_maker = r.get("m") if not rest else r.get("isBuyerMaker")
+    return TradeUpdate(
+        symbol=native_symbol,
+        price=str(r.get("p") if not rest else r.get("price")),
+        qty=str(r.get("q") if not rest else r.get("qty")),
+        trade_id=str(r.get("t") if not rest else r.get("id")),
+        ts_exchange=r.get("T") if not rest else r.get("time"),
+        side=taker_from_buyer_maker(buyer_is_maker),
+        raw_side=f"m={buyer_is_maker}",
+    )

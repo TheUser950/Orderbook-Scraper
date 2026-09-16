@@ -12,10 +12,18 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    normalise_side,
+    parse_levels,
+)
 
 _SYMBOLS = "https://api.huobi.pro/v1/common/symbols"
 _DEPTH = "https://api.huobi.pro/market/depth"
+_TRADES = "https://api.huobi.pro/market/history/trade"
 
 
 class HtxAdapter(ExchangeAdapter):
@@ -34,6 +42,33 @@ class HtxAdapter(ExchangeAdapter):
             {"sub": f"market.{s.native}.depth.step0", "id": f"obs-{i}"}
             for i, s in enumerate(self.symbols)
         ]
+
+    def trade_subscribe_payloads(self) -> list[Any]:
+        return [
+            {"sub": f"market.{s.native}.trade.detail", "id": f"obs-tr-{i}"}
+            for i, s in enumerate(self.symbols)
+        ]
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        if not isinstance(msg, dict):
+            return []
+        ch = msg.get("ch", "")
+        if not ch.startswith("market.") or not ch.endswith(".trade.detail"):
+            return []
+        native_symbol = ch.split(".")[1]
+        tick = msg.get("tick") or {}
+        return [_trade(e, native_symbol) for e in tick.get("data") or []]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        data = await self.get_json(
+            session, _TRADES, params={"symbol": sym.native, "size": "100"}
+        )
+        out: list[TradeUpdate] = []
+        for block in data.get("data") or []:
+            out.extend(_trade(e, sym.native) for e in block.get("data") or [])
+        return out
 
     def reactive_reply(self, msg: Any) -> Any | None:
         if isinstance(msg, dict) and "ping" in msg:
@@ -80,3 +115,22 @@ class HtxAdapter(ExchangeAdapter):
             ts_exchange=data.get("ts"),
             seq=tick.get("version"),
         )
+
+
+def _trade(e: dict, native_symbol: str) -> TradeUpdate:
+    """HTX's `direction` is the taker side already.
+
+    Prices and amounts arrive as JSON numbers here, unlike the string-based
+    exchanges, so they are stringified without going through float().
+    """
+    raw = e.get("direction")
+    trade_id = e.get("tradeId") if e.get("tradeId") is not None else e.get("id")
+    return TradeUpdate(
+        symbol=native_symbol,
+        price=str(e.get("price")),
+        qty=str(e.get("amount")),
+        trade_id=str(trade_id) if trade_id is not None else None,
+        ts_exchange=e.get("ts"),
+        side=normalise_side(raw),
+        raw_side=raw,
+    )

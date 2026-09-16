@@ -12,10 +12,18 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    normalise_side,
+    parse_levels,
+)
 
 _INSTRUMENTS = "https://api.bybit.com/v5/market/instruments-info"
 _ORDERBOOK = "https://api.bybit.com/v5/market/orderbook"
+_TRADES = "https://api.bybit.com/v5/market/recent-trade"
 _CHANNEL_DEPTHS = (1, 50, 200)
 
 
@@ -45,6 +53,32 @@ class BybitAdapter(ExchangeAdapter):
                 "args": [f"orderbook.{self.sub_depth}.{s.native}" for s in self.symbols],
             }
         ]
+
+    def trade_subscribe_payloads(self) -> list[Any]:
+        return [
+            {
+                "op": "subscribe",
+                "args": [f"publicTrade.{s.native}" for s in self.symbols],
+            }
+        ]
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        topic = msg.get("topic") if isinstance(msg, dict) else None
+        if not topic or not topic.startswith("publicTrade."):
+            return []
+        data = msg.get("data") or []
+        return [_trade(e) for e in data]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        data = await self.get_json(
+            session,
+            _TRADES,
+            params={"category": "spot", "symbol": sym.native, "limit": "60"},
+        )
+        rows = (data.get("result") or {}).get("list", [])
+        return [_trade(e) for e in rows]
 
     def keepalive_payload(self) -> Any | None:
         return {"op": "ping"}
@@ -92,3 +126,17 @@ class BybitAdapter(ExchangeAdapter):
             asks=parse_levels(result.get("a"), self.effective_depth),
             seq=result.get("u"),
         )
+
+
+def _trade(e: dict) -> TradeUpdate:
+    """Bybit's `S` is the taker side already. Same shape on WS and REST."""
+    raw = e.get("S")
+    return TradeUpdate(
+        symbol=e.get("s", ""),
+        price=str(e.get("p")),
+        qty=str(e.get("v")),
+        trade_id=str(e.get("i")) if e.get("i") is not None else None,
+        ts_exchange=e.get("T"),
+        side=normalise_side(raw),
+        raw_side=raw,
+    )

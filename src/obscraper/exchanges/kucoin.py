@@ -15,8 +15,16 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    normalise_side,
+    parse_levels,
+)
 
+_HISTORIES = "https://api.kucoin.com/api/v1/market/histories"
 _BULLET = "https://api.kucoin.com/api/v1/bullet-public"
 _SYMBOLS = "https://api.kucoin.com/api/v1/symbols"
 _DEPTH20 = "https://api.kucoin.com/api/v1/market/orderbook/level2_20"
@@ -65,6 +73,33 @@ class KucoinAdapter(ExchangeAdapter):
             for s in self.symbols
         ]
 
+    def trade_subscribe_payloads(self) -> list[Any]:
+        return [
+            {
+                "id": str(next(_ids)),
+                "type": "subscribe",
+                "topic": f"/market/match:{s.native}",
+                "privateChannel": False,
+                "response": True,
+            }
+            for s in self.symbols
+        ]
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        if not isinstance(msg, dict) or msg.get("type") != "message":
+            return []
+        topic = msg.get("topic", "")
+        if not topic.startswith("/market/match:"):
+            return []
+        data = msg.get("data") or {}
+        return [_trade(data, topic.rsplit(":", 1)[-1])]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        data = await self.get_json(session, _HISTORIES, params={"symbol": sym.native})
+        return [_trade(e, sym.native) for e in data.get("data") or []]
+
     def keepalive_payload(self) -> Any | None:
         return {"id": str(next(_ids)), "type": "ping"}
 
@@ -105,3 +140,27 @@ class KucoinAdapter(ExchangeAdapter):
             asks=parse_levels(entry.get("asks"), self.effective_depth),
             seq=entry.get("sequence"),
         )
+
+
+def _trade(e: dict, native_symbol: str) -> TradeUpdate:
+    """KuCoin's `side` is the taker side already.
+
+    Timestamps come in nanoseconds on both the match channel and the histories
+    endpoint, so they are divided down to milliseconds.
+    """
+    raw = e.get("side")
+    ts_ns = e.get("time")
+    try:
+        ts_ms = int(ts_ns) // 1_000_000 if ts_ns is not None else None
+    except (TypeError, ValueError):
+        ts_ms = None
+    trade_id = e.get("tradeId") if e.get("tradeId") is not None else e.get("sequence")
+    return TradeUpdate(
+        symbol=native_symbol,
+        price=str(e.get("price")),
+        qty=str(e.get("size")),
+        trade_id=str(trade_id) if trade_id is not None else None,
+        ts_exchange=ts_ms,
+        side=normalise_side(raw),
+        raw_side=raw,
+    )

@@ -97,6 +97,7 @@ def main() -> int:
         _grid_report(conn, run_id, exchanges, gap_limit_ms)
 
     _stream_report(conn, run_id)
+    _trades_report(conn, run_id)
     _skipped_note(conn, run_id)
 
     conn.close()
@@ -212,6 +213,58 @@ def _stream_report(conn: sqlite3.Connection, run_id: int) -> None:
         )
     print("-" * len(header))
     print(f"{'TOTAL':10s} {total:>8d}")
+
+
+def _trades_report(conn: sqlite3.Connection, run_id: int) -> None:
+    """Executed trades: rate, buy/sell balance and trade-id coverage.
+
+    A buy/sell split far from 50/50 is worth a second look - it usually means
+    the aggressor-side normalisation is wrong for that exchange rather than
+    that the market was genuinely one-sided.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT exchange, COUNT(*) n, COUNT(DISTINCT symbol) syms, "
+            "       MIN(ts_recv) lo, MAX(ts_recv) hi, "
+            "       SUM(side='buy') buys, SUM(side='sell') sells, "
+            "       SUM(trade_id IS NOT NULL) ided "
+            "FROM trades WHERE run_id = ? GROUP BY exchange ORDER BY exchange",
+            (run_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return  # table absent (database written by an older version)
+    if not rows:
+        return
+
+    print("\n=== Executed trades (trades) ===")
+    header = (
+        f"{'Exchange':10s} {'Trades':>7s} {'Symbols':>8s} {'Trades/s':>9s} "
+        f"{'buy%':>6s} {'sell%':>6s} {'with id':>8s}"
+    )
+    print(header)
+    print("-" * len(header))
+    total = 0
+    for r in rows:
+        span = max(1.0, (r["hi"] - r["lo"]) / 1000)
+        n = r["n"]
+        total += n
+        sided = (r["buys"] or 0) + (r["sells"] or 0)
+        buy_pct = 100 * (r["buys"] or 0) / sided if sided else float("nan")
+        sell_pct = 100 * (r["sells"] or 0) / sided if sided else float("nan")
+        print(
+            f"{r['exchange']:10s} {n:>7d} {r['syms']:>8d} {n / span:>9.2f} "
+            f"{buy_pct:>5.1f}% {sell_pct:>5.1f}% {100 * (r['ided'] or 0) / n:>7.0f}%"
+        )
+    print("-" * len(header))
+    print(f"{'TOTAL':10s} {total:>7d}")
+
+    dupes = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM trades WHERE run_id = ? "
+        "AND trade_id IS NOT NULL GROUP BY exchange, symbol, trade_id "
+        "HAVING COUNT(*) > 1)",
+        (run_id,),
+    ).fetchone()[0]
+    print(f"duplicate (exchange, symbol, trade_id) groups: {dupes}")
 
 
 def _skipped_note(conn: sqlite3.Connection, run_id: int) -> None:

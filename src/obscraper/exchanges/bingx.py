@@ -17,10 +17,18 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    parse_levels,
+    sort_levels,
+)
 
 _SYMBOLS = "https://open-api.bingx.com/openApi/spot/v1/common/symbols"
 _DEPTH = "https://open-api.bingx.com/openApi/spot/v1/market/depth"
+_TRADES = "https://open-api.bingx.com/openApi/spot/v1/market/trades"
 _PARTIAL_DEPTHS = [5, 10, 20, 50, 100]
 
 
@@ -46,6 +54,36 @@ class BingXAdapter(ExchangeAdapter):
             for s in self.symbols
         ]
 
+    def trade_subscribe_payloads(self) -> list[Any]:
+        return [
+            {
+                "id": str(uuid.uuid4()),
+                "reqType": "sub",
+                "dataType": f"{s.native}@trade",
+            }
+            for s in self.symbols
+        ]
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        if not isinstance(msg, dict):
+            return []
+        data_type = msg.get("dataType", "")
+        if not data_type.endswith("@trade"):
+            return []
+        native_symbol = data_type.split("@", 1)[0]
+        data = msg.get("data")
+        rows = data if isinstance(data, list) else [data]
+        return [_trade(e, native_symbol) for e in rows if isinstance(e, dict)]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        data = await self.get_json(
+            session, _TRADES, params={"symbol": sym.native, "limit": "100"}
+        )
+        rows = data.get("data") or []
+        return [_trade(e, sym.native) for e in rows if isinstance(e, dict)]
+
     def reactive_reply(self, msg: Any) -> Any | None:
         if isinstance(msg, str) and msg.strip() == "Ping":
             return "Pong"
@@ -59,11 +97,21 @@ class BingXAdapter(ExchangeAdapter):
             return []
         native_symbol = data_type.split("@", 1)[0]
         data = msg.get("data") or {}
-        bids = parse_levels(data.get("bids"), self.effective_depth)
-        asks = parse_levels(data.get("asks"), self.effective_depth)
+        bids, asks = self._ordered(data.get("bids"), data.get("asks"))
         if not bids and not asks:
             return []
         return [BookUpdate(symbol=native_symbol, bids=bids, asks=asks)]
+
+    def _ordered(self, raw_bids, raw_asks) -> tuple[list, list]:
+        """BingX delivers asks worst-price-first, so sort before truncating.
+
+        Verified against the live feed: bids arrive descending as usual, but
+        asks arrive descending too, which puts the best ask last. Truncating
+        first would therefore keep the worst levels and drop the best ones.
+        """
+        bids = sort_levels(parse_levels(raw_bids), descending=True)
+        asks = sort_levels(parse_levels(raw_asks), descending=False)
+        return bids[: self.effective_depth], asks[: self.effective_depth]
 
     async def fetch_listed_symbols(self, session: aiohttp.ClientSession) -> set[str]:
         data = await self.get_json(session, _SYMBOLS)
@@ -78,8 +126,33 @@ class BingXAdapter(ExchangeAdapter):
             session, _DEPTH, params={"symbol": sym.native, "limit": str(depth)}
         )
         entry = data.get("data") or {}
-        return BookUpdate(
-            symbol=sym.native,
-            bids=parse_levels(entry.get("bids"), self.effective_depth),
-            asks=parse_levels(entry.get("asks"), self.effective_depth),
-        )
+        bids, asks = self._ordered(entry.get("bids"), entry.get("asks"))
+        return BookUpdate(symbol=sym.native, bids=bids, asks=asks)
+
+
+def _trade(e: dict, native_symbol: str) -> TradeUpdate:
+    """BingX trades. The aggressor side is deliberately left unknown.
+
+    The frame carries an `m` flag that looks like Binance's "buyer is maker",
+    and the field names were confirmed against the live feed. But interpreting
+    it that way does not survive validation: measured over ~1400 trades, `m`
+    shows no relationship to where the trade printed (buy and sell produce
+    near-identical distributions across bid/ask), and a book-independent tick
+    test scores 47.8% - indistinguishable from random. Inverting it does not
+    help either; the flag simply carries no directional information we can
+    confirm.
+
+    Writing a side we cannot validate is worse than writing none: it would look
+    perfectly plausible while silently corrupting any order-flow analysis. So
+    `side` stays NULL and the flag is preserved verbatim in `raw_side`, ready
+    to be reinterpreted if BingX documents it or the meaning becomes clear.
+    """
+    return TradeUpdate(
+        symbol=native_symbol,
+        price=str(e.get("p") if e.get("p") is not None else e.get("price")),
+        qty=str(e.get("q") if e.get("q") is not None else e.get("qty")),
+        trade_id=str(e.get("t")) if e.get("t") is not None else None,
+        ts_exchange=e.get("T") if e.get("T") is not None else e.get("time"),
+        side=None,
+        raw_side=f"m={e.get('m')}",
+    )

@@ -13,6 +13,14 @@ general:
   # needs resampling before exchanges can be compared.
   mode: grid
 
+  # Record executed trades (the tape) as well. Independent of `mode`: a trade
+  # is an event that either happened or did not, so there is no grid concept -
+  # every trade is written as it arrives, into the `trades` table.
+  #
+  # `side` there is always the AGGRESSOR (taker) side, normalised across
+  # exchanges; `raw_side` keeps whatever the exchange originally sent.
+  trades: true
+
   # Canonical BASE/QUOTE spelling. Translating into each exchange's own
   # spelling (ETHUSDC, ETH-USDC, ETH_USDC, ...) is the adapter's job.
   symbols:

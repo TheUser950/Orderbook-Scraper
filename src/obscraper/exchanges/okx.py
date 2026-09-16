@@ -13,10 +13,18 @@ from typing import Any
 
 import aiohttp
 
-from .base import BookUpdate, ExchangeAdapter, SymbolStatus, parse_levels
+from .base import (
+    BookUpdate,
+    ExchangeAdapter,
+    SymbolStatus,
+    TradeUpdate,
+    normalise_side,
+    parse_levels,
+)
 
 _INSTRUMENTS = "https://www.okx.com/api/v5/public/instruments"
 _BOOKS = "https://www.okx.com/api/v5/market/books"
+_TRADES = "https://www.okx.com/api/v5/market/trades"
 
 
 class OkxAdapter(ExchangeAdapter):
@@ -47,6 +55,32 @@ class OkxAdapter(ExchangeAdapter):
                 ],
             }
         ]
+
+    def trade_subscribe_payloads(self) -> list[Any]:
+        return [
+            {
+                "op": "subscribe",
+                "args": [
+                    {"channel": "trades", "instId": s.native} for s in self.symbols
+                ],
+            }
+        ]
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        if not isinstance(msg, dict) or "arg" not in msg or "data" not in msg:
+            return []
+        if msg["arg"].get("channel") != "trades":
+            return []
+        native_symbol = msg["arg"].get("instId", "")
+        return [_trade(e, native_symbol) for e in msg["data"]]
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        data = await self.get_json(
+            session, _TRADES, params={"instId": sym.native, "limit": "100"}
+        )
+        return [_trade(e, sym.native) for e in data.get("data") or []]
 
     def keepalive_payload(self) -> Any | None:
         return "ping"
@@ -98,6 +132,20 @@ class OkxAdapter(ExchangeAdapter):
             asks=parse_levels(entry.get("asks"), self.effective_depth),
             ts_exchange=_to_int(entry.get("ts")),
         )
+
+
+def _trade(e: dict, native_symbol: str) -> TradeUpdate:
+    """OKX reports `side` as the taker side already - no inversion needed."""
+    raw = e.get("side")
+    return TradeUpdate(
+        symbol=native_symbol,
+        price=str(e.get("px")),
+        qty=str(e.get("sz")),
+        trade_id=str(e.get("tradeId")) if e.get("tradeId") is not None else None,
+        ts_exchange=_to_int(e.get("ts")),
+        side=normalise_side(raw),
+        raw_side=raw,
+    )
 
 
 def _to_int(value: Any) -> int | None:

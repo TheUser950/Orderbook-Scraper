@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..models import OrderBookSnapshot
+from ..models import OrderBookSnapshot, TradeEvent
 
 
 class Writer(Protocol):
@@ -22,6 +22,10 @@ class Writer(Protocol):
 
     def submit_update(self, snap: OrderBookSnapshot) -> None:
         """A single incoming update -> book_updates table (stream mode)."""
+        ...
+
+    def submit_trade(self, tr: TradeEvent) -> None:
+        """One executed trade -> trades table."""
         ...
 
     def submit_event(

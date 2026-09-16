@@ -18,6 +18,7 @@ import zlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import aiohttp
@@ -33,6 +34,7 @@ from ..models import (
     IncrementalBook,
     Level,
     OrderBookSnapshot,
+    TradeEvent,
     is_crossed,
     now_ms,
 )
@@ -50,6 +52,52 @@ class BookUpdate:
     ts_exchange: int | None = None
     seq: int | None = None
     is_snapshot: bool = True
+
+
+@dataclass(slots=True)
+class TradeUpdate:
+    """One parsed executed trade, in exchange-independent form.
+
+    ``side`` must already be normalised to the **aggressor** (taker) side by the
+    adapter, since only the adapter knows its exchange's convention. Keep the
+    original value in ``raw_side`` so the normalisation can be audited later.
+    """
+
+    symbol: str  # exchange-native spelling
+    price: str
+    qty: str
+    trade_id: str | None = None
+    ts_exchange: int | None = None
+    side: str | None = None
+    raw_side: str | None = None
+
+
+# The only two values `side` may take once normalised.
+BUY, SELL = "buy", "sell"
+
+
+def taker_from_buyer_maker(buyer_is_maker: Any) -> str:
+    """Binance-style flag -> taker side.
+
+    If the buyer was the maker, the seller must have been the aggressor.
+    """
+    return SELL if bool(buyer_is_maker) else BUY
+
+
+def invert_side(side: str) -> str:
+    return SELL if side == BUY else BUY
+
+
+def normalise_side(value: Any) -> str | None:
+    """'Buy'/'BUY'/'buy' -> 'buy'. Returns None for anything unrecognised."""
+    if not isinstance(value, str):
+        return None
+    low = value.strip().lower()
+    if low in ("buy", "b", "bid"):
+        return BUY
+    if low in ("sell", "s", "ask"):
+        return SELL
+    return None
 
 
 @dataclass(slots=True)
@@ -95,6 +143,25 @@ def parse_levels(raw: Any, limit: int | None = None) -> list[Level]:
     return out
 
 
+def sort_levels(levels: list[Level], descending: bool) -> list[Level]:
+    """Sort levels by price, best first.
+
+    Most exchanges already deliver bids descending and asks ascending, so this
+    is only for the ones that do not: BingX sends its asks worst-price-first.
+    Sorting explicitly rather than reversing keeps it correct whichever order
+    arrives, and it must happen *before* truncating to the configured depth -
+    otherwise the best levels are the ones thrown away.
+    """
+    return sorted(levels, key=lambda lv: _price(lv[0]), reverse=descending)
+
+
+def _price(value: str) -> Decimal:
+    try:
+        return Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(0)
+
+
 class ExchangeAdapter(ABC):
     # -- Per-exchange declaration -----------------------------------------
     name: str = ""
@@ -105,6 +172,7 @@ class ExchangeAdapter(ABC):
     # True when the channel delivers snapshot + deltas that have to be
     # reassembled locally (OKX, Bitget, Bybit, Coinbase).
     MAINTAINS_BOOK: bool = False
+    SUPPORTS_TRADES: bool = True
     GZIP_FRAMES: bool = False
     KEEPALIVE_INTERVAL: float | None = None
     SUPPORTS_WS: bool = True
@@ -140,6 +208,10 @@ class ExchangeAdapter(ABC):
         # Set by run.py when stream mode is active. Left as None otherwise, so
         # adapters stay unaware of the writer exactly as before.
         self.on_update: Callable[[OrderBookSnapshot], None] | None = None
+        # Set by run.py when trade collection is on.
+        self.on_trade: Callable[[TradeEvent], None] | None = None
+        self.collect_trades = False
+        self.trades_seen = 0
         self._by_canonical: dict[str, SymbolStatus] = {
             s.canonical: s for s in self.symbols
         }
@@ -168,7 +240,26 @@ class ExchangeAdapter(ABC):
         """A single order book fetched over REST."""
 
     def parse(self, msg: Any) -> list[BookUpdate]:
-        """Frame -> updates. Empty list for anything not of interest."""
+        """Frame -> book updates. Empty list for anything not of interest."""
+        return []
+
+    def parse_trades(self, msg: Any) -> list[TradeUpdate]:
+        """Frame -> executed trades. Empty list for anything not of interest."""
+        return []
+
+    def trade_subscribe_payloads(self) -> list[Any]:
+        """Trade-channel subscriptions, sent alongside the book ones.
+
+        Kept separate from :meth:`subscribe_payloads` so the latency probe keeps
+        measuring time-to-first-*depth*-message rather than whichever channel
+        happens to fire first.
+        """
+        return []
+
+    async def rest_trades(
+        self, session: aiohttp.ClientSession, sym: SymbolStatus
+    ) -> list[TradeUpdate]:
+        """Recent trades over REST, for the fallback path."""
         return []
 
     async def ws_url(self, endpoint: str, session: aiohttp.ClientSession) -> str:
@@ -296,7 +387,10 @@ class ExchangeAdapter(ABC):
             self.transport = "ws"
             for canonical in self.inc:
                 self.inc[canonical].reset()
-            for payload in self.subscribe_payloads():
+            payloads = list(self.subscribe_payloads())
+            if self.collect_trades:
+                payloads += self.trade_subscribe_payloads()
+            for payload in payloads:
                 await self._send(ws, payload)
             if on_connect is not None:
                 on_connect(endpoint)
@@ -327,6 +421,9 @@ class ExchangeAdapter(ABC):
 
         for upd in self.parse(msg):
             self._apply(upd)
+        if self.collect_trades:
+            for tr in self.parse_trades(msg):
+                self._emit_trade(tr)
         return None
 
     async def _keepalive(self, ws: Any) -> None:
@@ -366,6 +463,19 @@ class ExchangeAdapter(ABC):
                     if upd is not None:
                         self.messages += 1
                         self._apply(upd)
+
+                    if not self.collect_trades:
+                        continue
+                    try:
+                        for tr in await self.rest_trades(session, sym):
+                            self._emit_trade(tr)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self.last_error = f"{type(exc).__name__}: {exc}"
+                        log.debug(
+                            "%s REST trades error (%s): %s", self.name, sym.native, exc
+                        )
                 elapsed = time.monotonic() - started
                 await asyncio.sleep(max(0.0, interval - elapsed))
         finally:
@@ -427,6 +537,40 @@ class ExchangeAdapter(ABC):
                 ts_local=state.ts_recv,
                 flags=flags,
                 is_snapshot=is_snapshot,
+            )
+        )
+
+    def _emit_trade(self, tr: TradeUpdate) -> None:
+        """Hand one executed trade to the writer.
+
+        No dedupe and no grid: a trade is an event that either happened or did
+        not. Repeats are handled in the database instead, by the partial unique
+        index on (exchange, symbol, trade_id) - which is what makes the REST
+        fallback safe to overlap with the WebSocket.
+        """
+        if self.on_trade is None:
+            return
+        canonical = self.by_native.get(tr.symbol)
+        if canonical is None:
+            return
+        sym = self._by_canonical.get(canonical)
+        if sym is None or sym.listed is False:
+            return
+        self.trades_seen += 1
+        self.on_trade(
+            TradeEvent(
+                ts_recv=now_ms(),
+                ts_exchange=tr.ts_exchange,
+                exchange=self.name,
+                symbol=canonical,
+                exchange_symbol=sym.native,
+                trade_id=tr.trade_id,
+                price=tr.price,
+                qty=tr.qty,
+                side=tr.side,
+                raw_side=tr.raw_side,
+                transport=self.transport,
+                endpoint=self.endpoint,
             )
         )
 

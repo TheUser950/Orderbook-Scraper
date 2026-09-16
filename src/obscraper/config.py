@@ -31,6 +31,9 @@ class GeneralConfig:
     # stream -> write every incoming update into the book_updates table
     # both   -> both at once, into their two separate tables
     mode: str = "grid"
+    # Record executed trades as well. Independent of `mode`: trades are events,
+    # not state, so they are always written as they arrive.
+    trades: bool = True
     interval_ms: int = 1000
     depth: int = 20
     depth_policy: str = "at_least"
@@ -91,6 +94,7 @@ class ExchangeConfig:
     depth: int = 20
     depth_policy: str = "at_least"
     transport: str = "auto"
+    trades: bool = True
     symbols: list[str] = field(default_factory=list)
     symbol_override: dict[str, str] = field(default_factory=dict)
     ws_endpoints: list[str] | None = None
@@ -182,6 +186,7 @@ def _build_exchange(
         "depth",
         "depth_policy",
         "transport",
+        "trades",
         "symbols",
         "symbol_override",
         "ws_endpoints",
@@ -204,6 +209,7 @@ def _build_exchange(
         depth=int(over.get("depth", general.depth)),
         depth_policy=str(over.get("depth_policy", general.depth_policy)),
         transport=str(over.get("transport", general.transport)),
+        trades=bool(over.get("trades", general.trades)),
         symbols=list(over.get("symbols", general.symbols)),
         symbol_override=dict(over.get("symbol_override") or {}),
         ws_endpoints=list(over["ws_endpoints"]) if over.get("ws_endpoints") else None,

@@ -36,11 +36,17 @@ class Sampler:
         origin_wall = time.time()
         origin_mono = time.monotonic()
 
-        # Index of the next tick, relative to the reference point.
-        next_n = math.floor(origin_mono / grid_s) + 1
+        # The first tick lands on the next absolute wall-clock boundary, so
+        # every ts_grid is a whole multiple of interval_ms. That matters across
+        # runs: anchoring to an arbitrary start instant would give each run its
+        # own offset and the timestamps would no longer line up between them.
+        # Timestamps are stepped as integer milliseconds to stay exact.
+        first_ts_grid = (int(origin_wall * 1000) // self.interval_ms + 1) * self.interval_ms
+        first_mono = origin_mono + (first_ts_grid / 1000 - origin_wall)
 
+        k = 0
         while not stop.is_set():
-            target_mono = next_n * grid_s
+            target_mono = first_mono + k * grid_s
             delay = target_mono - time.monotonic()
             if delay > 0:
                 try:
@@ -51,17 +57,16 @@ class Sampler:
             if stop.is_set():
                 break
 
-            ts_grid = round((origin_wall + (target_mono - origin_mono)) * 1000)
-            self._sample_once(ts_grid)
+            self._sample_once(first_ts_grid + k * self.interval_ms)
             self.ticks += 1
 
-            next_n += 1
+            k += 1
             # If the loop missed several ticks (e.g. because something blocked
             # for a while), skip ahead to the next upcoming tick instead of
             # firing the missed ones back to back (no burst).
-            min_next = math.floor(time.monotonic() / grid_s) + 1
-            if next_n < min_next:
-                next_n = min_next
+            min_k = math.floor((time.monotonic() - first_mono) / grid_s) + 1
+            if k < min_k:
+                k = min_k
 
     def _sample_once(self, ts_grid: int) -> None:
         for adapter in self.adapters:

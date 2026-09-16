@@ -67,6 +67,31 @@ class OrderBookSnapshot:
     is_snapshot: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class TradeEvent:
+    """One executed trade - a row in the trades table.
+
+    ``side`` is always normalised to the **aggressor** (taker): 'buy' means a
+    taker lifted the offer, 'sell' means a taker hit the bid. Exchanges disagree
+    wildly on how they express this and two of them report the maker side
+    instead, so ``raw_side`` keeps whatever the exchange actually sent. That way
+    the normalisation stays auditable without re-scraping.
+    """
+
+    ts_recv: int
+    ts_exchange: int | None
+    exchange: str
+    symbol: str
+    exchange_symbol: str
+    trade_id: str | None
+    price: str
+    qty: str
+    side: str | None
+    raw_side: str | None
+    transport: str
+    endpoint: str | None
+
+
 def _to_decimal(value: str) -> Decimal:
     try:
         return Decimal(value)

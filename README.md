@@ -57,6 +57,52 @@ Two details make it safe:
   minute regardless. So any gap longer than that means something was genuinely
   wrong, and forward-fill distance is bounded.
 
+## Executed trades (the tape)
+
+With `general.trades: true` (the default) the scraper also records every
+executed trade into the `trades` table. This is independent of `mode`: a trade
+is an event that either happened or did not, so there is no grid concept — each
+trade is written as it arrives. All ten exchanges publish a public trade feed.
+
+### The aggressor side
+
+`side` is always normalised to the **taker** (aggressor): `buy` means a taker
+lifted the offer, `sell` means a taker hit the bid. Exchanges disagree sharply
+on how they express this, and getting it wrong does not crash anything — it
+silently inverts every order-flow conclusion. `raw_side` therefore keeps
+whatever the exchange originally sent, so the normalisation stays auditable.
+
+| Exchange | Source field | Handling |
+|---|---|---|
+| Binance | `m` (buyer is maker) | inverted → taker |
+| Coinbase | `side` = **maker** side | **inverted** → taker |
+| OKX, Bybit, Bitget, Gate, HTX, KuCoin | `side` / `direction` | already the taker |
+| MEXC | `tradeType` 1/2 | mapped directly |
+| BingX | `m` | **not used — see below** |
+
+This is verified empirically, not just from documentation: a taker buy must
+print at or above the mid and a taker sell at or below it. Measured against the
+contemporaneous book over a 180 s run, nine exchanges agree at 76–99.5%.
+
+**BingX records no side at all.** Its `m` flag failed validation on two
+independent tests — no relationship to where trades printed, and a
+book-independent tick test at 47.8%, i.e. random. Inverting it does not help.
+Rather than write a plausible-looking but unverifiable direction, `side` is left
+NULL there and the raw flag is preserved in `raw_side`.
+
+**MEXC uses aggregated trades**, because MEXC refuses the individual-trade
+channel outright (`Reason: Blocked!`). Its aggregated feed does carry trade ids.
+Aggregation blurs the price signal, which is why MEXC scores lower (76%) than
+the rest — expected, not a defect.
+
+### Deduplication
+
+A partial unique index on `(exchange, symbol, trade_id)` deduplicates wherever
+an exchange supplies an id, and never drops rows where it does not. That is what
+makes the REST fallback safe: overlapping polls re-deliver trades that are
+simply ignored. Verified — a 65 s run with a dead WebSocket collected 4,443
+trades over REST with zero duplicates despite heavy overlap.
+
 ## Configuration
 
 Everything relevant lives in `config.yaml`: symbols (`BASE/QUOTE`, e.g.
@@ -132,6 +178,7 @@ stream in 2025. There are two layers of defence against that:
 ```powershell
 python tests\test_protobuf.py
 python tests\test_dedupe.py
+python tests\test_trades.py
 ```
 
 `test_protobuf.py` covers the protobuf wire-format reader and the MEXC
@@ -142,7 +189,10 @@ truncated frames, exact price strings and depth truncation.
 down the cases where a row must be written even though the levels look
 identical — above all a feed going stale.
 
-Both run offline in under a second.
+`test_trades.py` pins the aggressor-side convention down with a captured frame
+per exchange, including the two inversions and BingX's deliberate NULL.
+
+All three run offline in under a second.
 
 ## Known limitations
 
@@ -158,6 +208,12 @@ Both run offline in under a second.
   `exchanges/okx.py` / `exchanges/bitget.py` if needed.
 - **KuCoin** fetches its token and WS host dynamically through a REST
   bootstrap (`/bullet-public`); endpoint racing effectively drops out.
+- **BingX sends its asks worst-price-first**, unlike every other exchange here
+  (verified against the live feed: bids descending as usual, but asks
+  descending too, putting the best ask last). `bingx.py` therefore sorts both
+  sides explicitly *before* truncating to the configured depth — truncating
+  first would keep the worst levels and discard the best. Sorting rather than
+  reversing keeps it correct if BingX ever changes the order.
 - Some exact field names (notably BingX) may change. `parse()` is written
   defensively everywhere - an unexpected message structure yields an empty
   list rather than an exception; the supervisor reconnects and the process
@@ -174,6 +230,10 @@ All figures measured over 120 s with 5 pairs, `depth: 20` and
 | **`grid` + dedupe (current default)** | **18,264** | **20.9 GB** |
 | `stream` + dedupe | 24,202 | 25.1 GB |
 | `grid` + dedupe, `depth: 10` | — | ~13 GB |
+| **trades** (`trades: true`) | 220/s | **3.8 GB** |
+
+Trades are cheap: ~200 bytes per row against ~1450 for a book row, about 11% of
+total storage in a `grid` + `trades` configuration.
 
 Further reductions: `depth: 10` removes roughly 36% of each row (the level
 JSON is 72% of it), and `interval_ms: 1000` cuts the grid volume by about 10x.

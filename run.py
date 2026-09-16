@@ -148,11 +148,14 @@ async def run_forever(app: AppConfig, duration: float | None) -> None:
         ]
 
         # Recording policy lives on the adapters, since they own the hot path.
-        for adapter in adapters:
+        for adapter, ex_cfg in zip(adapters, app.enabled_exchanges()):
             adapter.skip_unchanged = app.storage.skip_unchanged
             adapter.heartbeat_ms = app.storage.heartbeat_s * 1000
             if app.general.writes_stream():
                 adapter.on_update = writer.submit_update
+            if ex_cfg.trades and adapter.SUPPORTS_TRADES:
+                adapter.collect_trades = True
+                adapter.on_trade = writer.submit_trade
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -197,7 +200,7 @@ async def run_forever(app: AppConfig, duration: float | None) -> None:
 
         log.info(
             "Scraper running: %d exchanges, mode=%s%s, depth=%d, "
-            "skip_unchanged=%s, symbols=%s",
+            "skip_unchanged=%s, trades=%s, symbols=%s",
             len(adapters),
             app.general.mode,
             f", interval={app.general.interval_ms}ms"
@@ -205,6 +208,7 @@ async def run_forever(app: AppConfig, duration: float | None) -> None:
             else "",
             app.general.depth,
             app.storage.skip_unchanged,
+            sum(1 for a in adapters if a.collect_trades),
             ", ".join(app.general.symbols),
         )
 

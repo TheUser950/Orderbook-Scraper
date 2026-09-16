@@ -14,11 +14,11 @@ import time
 from pathlib import Path
 
 from ..config import StorageConfig
-from ..models import OrderBookSnapshot, now_ms
+from ..models import OrderBookSnapshot, TradeEvent, now_ms
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -86,6 +86,33 @@ CREATE TABLE IF NOT EXISTS book_updates (
 );
 CREATE INDEX IF NOT EXISTS ix_upd ON book_updates(exchange, symbol, ts_recv);
 
+-- Executed trades. Events, not state: there is no grid concept here, every
+-- trade is written as it arrives.
+CREATE TABLE IF NOT EXISTS trades (
+    id              INTEGER PRIMARY KEY,
+    run_id          INTEGER,
+    ts_recv         INTEGER NOT NULL,
+    ts_exchange     INTEGER,
+    exchange        TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    exchange_symbol TEXT    NOT NULL,
+    trade_id        TEXT,
+    price           TEXT    NOT NULL,
+    qty             TEXT    NOT NULL,
+    side            TEXT,
+    raw_side        TEXT,
+    transport       TEXT    NOT NULL,
+    endpoint        TEXT
+);
+
+-- Partial index: deduplicates where the exchange supplies an id, and never
+-- drops rows where it does not (MEXC sends no trade id at all). Makes the REST
+-- fallback safe, since overlapping polls re-deliver trades already stored.
+-- run_id is deliberately absent: the same trade seen by two runs is one trade.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_trade
+    ON trades(exchange, symbol, trade_id) WHERE trade_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_trade_ts ON trades(exchange, symbol, ts_exchange);
+
 CREATE TABLE IF NOT EXISTS connection_events (
     id       INTEGER PRIMARY KEY,
     ts       INTEGER NOT NULL,
@@ -134,9 +161,16 @@ INSERT INTO book_updates
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """
 
+_TRADE_SQL = """
+INSERT OR IGNORE INTO trades
+    (run_id, ts_recv, ts_exchange, exchange, symbol, exchange_symbol, trade_id,
+     price, qty, side, raw_side, transport, endpoint)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+"""
+
 _SENTINEL = object()
 
-SNAP, EVENT, LAT, UPD = 0, 1, 2, 3
+SNAP, EVENT, LAT, UPD, TRD = 0, 1, 2, 3, 4
 
 
 class SqliteWriter:
@@ -257,6 +291,28 @@ class SqliteWriter:
             )
         )
 
+    def submit_trade(self, tr: TradeEvent) -> None:
+        self._put(
+            (
+                TRD,
+                (
+                    self.run_id,
+                    tr.ts_recv,
+                    tr.ts_exchange,
+                    tr.exchange,
+                    tr.symbol,
+                    tr.exchange_symbol,
+                    tr.trade_id,
+                    tr.price,
+                    tr.qty,
+                    tr.side,
+                    tr.raw_side,
+                    tr.transport,
+                    tr.endpoint,
+                ),
+            )
+        )
+
     def submit_event(
         self,
         exchange: str,
@@ -350,6 +406,7 @@ class SqliteWriter:
             return
         snaps = [row for kind, row in batch if kind == SNAP]
         updates = [row for kind, row in batch if kind == UPD]
+        trades = [row for kind, row in batch if kind == TRD]
         events = [row for kind, row in batch if kind == EVENT]
         lats = [row for kind, row in batch if kind == LAT]
 
@@ -362,6 +419,8 @@ class SqliteWriter:
                     conn.executemany(_SNAP_SQL, snaps)
                 if updates:
                     conn.executemany(_UPD_SQL, updates)
+                if trades:
+                    conn.executemany(_TRADE_SQL, trades)
                 if events:
                     conn.executemany(_EVENT_SQL, events)
                 if lats:
@@ -375,7 +434,7 @@ class SqliteWriter:
 
         try:
             await asyncio.to_thread(_write)
-            self.written += len(snaps) + len(updates)
+            self.written += len(snaps) + len(updates) + len(trades)
         except sqlite3.Error as exc:
             self.dropped += len(batch)
             log.error("SQLite write error, %d rows lost: %s", len(batch), exc)
