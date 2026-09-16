@@ -52,6 +52,19 @@ class BookUpdate:
     ts_exchange: int | None = None
     seq: int | None = None
     is_snapshot: bool = True
+    # The sequence this delta claims to follow. When an exchange supplies it
+    # (OKX prevSeqId, Bitget pseq), a mismatch against the last seq we applied
+    # proves a message was missed - see _check_sequence.
+    prev_seq: int | None = None
+
+
+class BookSequenceGap(RuntimeError):
+    """A delta arrived that does not follow the last one we applied.
+
+    Raised so the supervisor tears the connection down and resubscribes, which
+    yields a fresh snapshot. Continuing would mean serving a book that is
+    silently wrong from that point on.
+    """
 
 
 @dataclass(slots=True)
@@ -212,6 +225,11 @@ class ExchangeAdapter(ABC):
         self.on_trade: Callable[[TradeEvent], None] | None = None
         self.collect_trades = False
         self.trades_seen = 0
+        # Reset on every connect, so "still zero" is evidence the trade
+        # subscription itself failed rather than that the market is quiet.
+        self.trades_this_connection = 0
+        self.seq_gaps = 0
+        self._last_seq: dict[str, int] = {}
         self._by_canonical: dict[str, SymbolStatus] = {
             s.canonical: s for s in self.symbols
         }
@@ -387,6 +405,9 @@ class ExchangeAdapter(ABC):
             self.transport = "ws"
             for canonical in self.inc:
                 self.inc[canonical].reset()
+            self._last_seq.clear()
+            self.trades_this_connection = 0
+            self.connected_since = time.monotonic()
             payloads = list(self.subscribe_payloads())
             if self.collect_trades:
                 payloads += self.trade_subscribe_payloads()
@@ -446,6 +467,8 @@ class ExchangeAdapter(ABC):
         )
         interval = interval_ms / 1000
         self.connected = True
+        self.connected_since = time.monotonic()
+        self.trades_this_connection = 0
         try:
             while True:
                 started = time.monotonic()
@@ -483,6 +506,9 @@ class ExchangeAdapter(ABC):
 
     # Set by the supervisor so REST polls on the sampling grid.
     conn_interval_ms: int = 1000
+    # When the current connection came up; used by the trade watchdog. Defined
+    # at class level so it is always readable, even before the first connect.
+    connected_since: float = 0.0
 
     # -- Book maintenance --------------------------------------------------
 
@@ -492,6 +518,7 @@ class ExchangeAdapter(ABC):
             return
 
         if self.MAINTAINS_BOOK:
+            self._check_sequence(canonical, upd)
             book = self.inc[canonical]
             if upd.is_snapshot:
                 book.reset()
@@ -540,6 +567,35 @@ class ExchangeAdapter(ABC):
             )
         )
 
+    def _check_sequence(self, canonical: str, upd: BookUpdate) -> None:
+        """Detect a missed delta on a locally maintained book.
+
+        OKX and Bitget chain their updates: each delta names the sequence it
+        follows. If that does not match the last one we applied, a message was
+        lost and every subsequent level is suspect - the book would keep
+        serving quietly wrong data with nothing to indicate it.
+
+        This replaces the checksum both exchanges used to ship: OKX now sends a
+        fixed 0 (deprecated 2026-06-23) and Bitget omits the field entirely, so
+        sequence chaining is the remaining integrity signal. It is also the
+        sharper one, identifying the exact message that went missing.
+        """
+        if upd.is_snapshot:
+            # A snapshot resets the chain; nothing to verify against.
+            if upd.seq is not None:
+                self._last_seq[canonical] = upd.seq
+            return
+
+        last = self._last_seq.get(canonical)
+        if upd.prev_seq is not None and last is not None and upd.prev_seq != last:
+            self.seq_gaps += 1
+            raise BookSequenceGap(
+                f"{self.name}/{canonical}: delta follows seq {upd.prev_seq} "
+                f"but the last applied was {last} - a message was missed"
+            )
+        if upd.seq is not None:
+            self._last_seq[canonical] = upd.seq
+
     def _emit_trade(self, tr: TradeUpdate) -> None:
         """Hand one executed trade to the writer.
 
@@ -557,6 +613,7 @@ class ExchangeAdapter(ABC):
         if sym is None or sym.listed is False:
             return
         self.trades_seen += 1
+        self.trades_this_connection += 1
         self.on_trade(
             TradeEvent(
                 ts_recv=now_ms(),

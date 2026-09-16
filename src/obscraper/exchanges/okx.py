@@ -105,6 +105,9 @@ class OkxAdapter(ExchangeAdapter):
                     asks=parse_levels(entry.get("asks")),
                     ts_exchange=_to_int(entry.get("ts")),
                     seq=_to_int(entry.get("seqId")),
+                    # books5 carries neither field, so the continuity check
+                    # simply does not engage there.
+                    prev_seq=_to_int(entry.get("prevSeqId")),
                     is_snapshot=(action == "snapshot"),
                 )
             )

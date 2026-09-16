@@ -78,7 +78,7 @@ class BybitAdapter(ExchangeAdapter):
             params={"category": "spot", "symbol": sym.native, "limit": "60"},
         )
         rows = (data.get("result") or {}).get("list", [])
-        return [_trade(e) for e in rows]
+        return [_rest_trade(e, sym.native) for e in rows]
 
     def keepalive_payload(self) -> Any | None:
         return {"op": "ping"}
@@ -129,14 +129,40 @@ class BybitAdapter(ExchangeAdapter):
 
 
 def _trade(e: dict) -> TradeUpdate:
-    """Bybit's `S` is the taker side already. Same shape on WS and REST."""
+    """WebSocket shape. `S` is the taker side already."""
     raw = e.get("S")
     return TradeUpdate(
         symbol=e.get("s", ""),
         price=str(e.get("p")),
         qty=str(e.get("v")),
         trade_id=str(e.get("i")) if e.get("i") is not None else None,
-        ts_exchange=e.get("T"),
+        ts_exchange=_to_int(e.get("T")),
         side=normalise_side(raw),
         raw_side=raw,
     )
+
+
+def _rest_trade(e: dict, native_symbol: str) -> TradeUpdate:
+    """REST shape, which shares no field names with the WebSocket one.
+
+    /v5/market/recent-trade returns execId/price/size/side/time, not
+    i/p/v/S/T. Reusing the WS parser here yielded an empty symbol and every
+    trade was silently dropped.
+    """
+    raw = e.get("side")
+    return TradeUpdate(
+        symbol=e.get("symbol") or native_symbol,
+        price=str(e.get("price")),
+        qty=str(e.get("size")),
+        trade_id=str(e["execId"]) if e.get("execId") is not None else None,
+        ts_exchange=_to_int(e.get("time")),
+        side=normalise_side(raw),
+        raw_side=raw,
+    )
+
+
+def _to_int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None

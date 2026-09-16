@@ -218,6 +218,101 @@ def test_unlisted_symbol_is_not_emitted() -> None:
     check("nothing emitted for an unlisted pair", captured == [], str(len(captured)))
 
 
+# -- Book integrity -------------------------------------------------------
+
+
+def test_sequence_gap_detection() -> None:
+    """A missed delta must abort the connection, not corrupt the book silently.
+
+    OKX and Bitget chain their updates, each delta naming the sequence it
+    follows. This replaced their checksums: OKX now sends a fixed 0 (deprecated
+    2026-06-23) and Bitget omits the field entirely.
+    """
+    print("\nBook sequence continuity:")
+    from obscraper.exchanges.base import BookSequenceGap  # noqa: PLC0415
+    from obscraper.exchanges.okx import OkxAdapter  # noqa: PLC0415
+
+    def okx_frame(action, seq, prev_seq, px="2500.0"):
+        return {
+            "arg": {"channel": "books", "instId": "ETH-USDC"},
+            "action": action,
+            "data": [{
+                "bids": [[px, "1", "0", "1"]],
+                "asks": [["2501.0", "1", "0", "1"]],
+                "ts": "1700000000123", "checksum": 0,
+                "seqId": seq, "prevSeqId": prev_seq,
+            }],
+        }
+
+    a = OkxAdapter(ExchangeConfig(name="okx", depth=20, symbols=["ETH/USDC"]),
+                   ConnectionConfig())
+    a.symbols[0].listed = True
+
+    for upd in a.parse(okx_frame("snapshot", 100, -1)):
+        a._apply(upd)
+    check("snapshot accepted", a.books.get("ETH/USDC") is not None)
+
+    for upd in a.parse(okx_frame("update", 101, 100)):
+        a._apply(upd)
+    check("contiguous delta accepted", a.seq_gaps == 0, str(a.seq_gaps))
+
+    for upd in a.parse(okx_frame("update", 105, 104)):  # 104 != 101
+        try:
+            a._apply(upd)
+            check("gap raises BookSequenceGap", False, "no exception")
+        except BookSequenceGap:
+            check("gap raises BookSequenceGap", True)
+    check("gap counted", a.seq_gaps == 1, str(a.seq_gaps))
+
+    # A fresh snapshot after the reconnect must re-anchor the chain.
+    for upd in a.parse(okx_frame("snapshot", 200, -1)):
+        a._apply(upd)
+    for upd in a.parse(okx_frame("update", 201, 200)):
+        a._apply(upd)
+    check("snapshot re-anchors the chain", a.seq_gaps == 1, str(a.seq_gaps))
+
+    # books5 sends no sequence fields at all - the check must stay dormant.
+    b = OkxAdapter(ExchangeConfig(name="okx", depth=5, symbols=["ETH/USDC"]),
+                   ConnectionConfig())
+    b.symbols[0].listed = True
+    for _ in range(3):
+        msg = {"arg": {"channel": "books5", "instId": "ETH-USDC"},
+               "data": [{"bids": [["2500.0", "1"]], "asks": [["2501.0", "1"]],
+                         "ts": "1700000000123"}]}
+        for upd in b.parse(msg):
+            b._apply(upd)
+    check("no sequence fields -> no false gaps", b.seq_gaps == 0, str(b.seq_gaps))
+
+
+def test_bitget_sequence_fields() -> None:
+    print("\nBitget sequence fields:")
+    from obscraper.exchanges.base import BookSequenceGap  # noqa: PLC0415
+    from obscraper.exchanges.bitget import BitgetAdapter  # noqa: PLC0415
+
+    def frame(action, seq, pseq):
+        return {
+            "arg": {"instType": "SPOT", "channel": "books", "instId": "ETHUSDC"},
+            "action": action,
+            "data": [{"bids": [["2500.0", "1"]], "asks": [["2501.0", "1"]],
+                      "ts": "1700000000123", "seq": seq, "pseq": pseq}],
+        }
+
+    a = BitgetAdapter(ExchangeConfig(name="bitget", depth=20, symbols=["ETH/USDC"]),
+                      ConnectionConfig())
+    a.symbols[0].listed = True
+    for upd in a.parse(frame("snapshot", 500, 0)):
+        a._apply(upd)
+    for upd in a.parse(frame("update", 501, 500)):
+        a._apply(upd)
+    check("contiguous delta accepted", a.seq_gaps == 0, str(a.seq_gaps))
+    for upd in a.parse(frame("update", 510, 509)):
+        try:
+            a._apply(upd)
+            check("gap detected", False, "no exception")
+        except BookSequenceGap:
+            check("gap detected", True)
+
+
 # -- Regressions ----------------------------------------------------------
 
 
@@ -331,6 +426,8 @@ if __name__ == "__main__":
     test_stream_records_delta_flag()
     test_grid_and_stream_are_independent()
     test_unlisted_symbol_is_not_emitted()
+    test_sequence_gap_detection()
+    test_bitget_sequence_fields()
     test_bingx_ask_ordering()
     test_grid_timestamps_are_absolute()
 

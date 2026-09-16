@@ -103,6 +103,10 @@ class BitgetAdapter(ExchangeAdapter):
                     bids=parse_levels(entry.get("bids")),
                     asks=parse_levels(entry.get("asks")),
                     ts_exchange=_to_int(entry.get("ts")),
+                    seq=_to_int(entry.get("seq")),
+                    # Only the incremental "books" channel chains updates; the
+                    # fixed books1/5/15 snapshots carry no pseq.
+                    prev_seq=_to_int(entry.get("pseq")),
                     is_snapshot=is_snapshot,
                 )
             )

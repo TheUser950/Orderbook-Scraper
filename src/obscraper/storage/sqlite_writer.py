@@ -179,6 +179,8 @@ class SqliteWriter:
         self.run_id: int | None = None
         self.written = 0
         self.dropped = 0
+        # Submitted but skipped as an existing row (INSERT OR IGNORE).
+        self.ignored = 0
         self._conn: sqlite3.Connection | None = None
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=cfg.queue_maxsize)
         self._task: asyncio.Task | None = None
@@ -236,8 +238,9 @@ class SqliteWriter:
         await asyncio.to_thread(_finish)
         self._conn = None
         log.info(
-            "SQLite closed. %d rows written, %d dropped.",
+            "SQLite closed. %d rows stored, %d already present, %d dropped.",
             self.written,
+            self.ignored,
             self.dropped,
         )
 
@@ -410,10 +413,16 @@ class SqliteWriter:
         events = [row for kind, row in batch if kind == EVENT]
         lats = [row for kind, row in batch if kind == LAT]
 
-        def _write() -> None:
+        def _write() -> int:
             conn = self._conn
             if conn is None:
-                return
+                return 0
+            # Count rows that actually landed. Both snapshots and trades use
+            # INSERT OR IGNORE, so a submitted row may be silently skipped as a
+            # duplicate - and during REST polling, where windows overlap
+            # heavily, most of them are. Reporting submissions would overstate
+            # the stored data several-fold.
+            before = conn.total_changes
             try:
                 if snaps:
                     conn.executemany(_SNAP_SQL, snaps)
@@ -426,6 +435,7 @@ class SqliteWriter:
                 if lats:
                     conn.executemany(_LAT_SQL, lats)
                 conn.commit()
+                return conn.total_changes - before
             except sqlite3.Error:
                 # A failed batch must not terminate the scraper - the running
                 # connections are worth more than these few rows.
@@ -433,8 +443,11 @@ class SqliteWriter:
                 raise
 
         try:
-            await asyncio.to_thread(_write)
-            self.written += len(snaps) + len(updates) + len(trades)
+            inserted = await asyncio.to_thread(_write)
+            self.written += inserted
+            self.ignored += (
+                len(snaps) + len(updates) + len(trades) + len(events) + len(lats)
+            ) - inserted
         except sqlite3.Error as exc:
             self.dropped += len(batch)
             log.error("SQLite write error, %d rows lost: %s", len(batch), exc)

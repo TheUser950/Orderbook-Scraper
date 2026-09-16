@@ -82,7 +82,7 @@ class BingXAdapter(ExchangeAdapter):
             session, _TRADES, params={"symbol": sym.native, "limit": "100"}
         )
         rows = data.get("data") or []
-        return [_trade(e, sym.native) for e in rows if isinstance(e, dict)]
+        return [_rest_trade(e, sym.native) for e in rows if isinstance(e, dict)]
 
     def reactive_reply(self, msg: Any) -> Any | None:
         if isinstance(msg, str) and msg.strip() == "Ping":
@@ -149,10 +149,28 @@ def _trade(e: dict, native_symbol: str) -> TradeUpdate:
     """
     return TradeUpdate(
         symbol=native_symbol,
-        price=str(e.get("p") if e.get("p") is not None else e.get("price")),
-        qty=str(e.get("q") if e.get("q") is not None else e.get("qty")),
-        trade_id=str(e.get("t")) if e.get("t") is not None else None,
-        ts_exchange=e.get("T") if e.get("T") is not None else e.get("time"),
+        price=str(e.get("p")),
+        qty=str(e.get("q")),
+        trade_id=str(e["t"]) if e.get("t") is not None else None,
+        ts_exchange=e.get("T"),
         side=None,
         raw_side=f"m={e.get('m')}",
+    )
+
+
+def _rest_trade(e: dict, native_symbol: str) -> TradeUpdate:
+    """REST shape: id/price/qty/time/buyerMaker, none of the WS field names.
+
+    Reusing the WS parser here lost the trade id, so nothing deduplicated and
+    every poll re-inserted the whole window. The side stays unknown for the
+    same reason as on the WebSocket.
+    """
+    return TradeUpdate(
+        symbol=native_symbol,
+        price=str(e.get("price")),
+        qty=str(e.get("qty")),
+        trade_id=str(e["id"]) if e.get("id") is not None else None,
+        ts_exchange=e.get("time"),
+        side=None,
+        raw_side=f"buyerMaker={e.get('buyerMaker')}",
     )

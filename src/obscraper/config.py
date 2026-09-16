@@ -75,6 +75,10 @@ class ConnectionConfig:
     ws_failures_before_rest: int = 3
     rest_fallback_duration_s: float = 600.0
     stale_after_s: float = 15.0
+    # Warn when a connection has been up this long and delivered no trades at
+    # all - evidence the trade subscription was rejected rather than that the
+    # market is quiet. 0 disables the check.
+    trade_silence_warn_s: float = 600.0
     record_stale_snapshots: bool = True
     ws_ping_interval_s: float = 20.0
     rest_timeout_s: float = 10.0

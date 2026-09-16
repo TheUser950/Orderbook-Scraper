@@ -284,16 +284,34 @@ class MexcAdapter(ExchangeAdapter):
         out: list[TradeUpdate] = []
         for e in rows:
             buyer_is_maker = e.get("isBuyerMaker")
+            ts = e.get("time")
+            price = str(e.get("price"))
+            qty = str(e.get("qty"))
+            side = SELL if buyer_is_maker else BUY
+
+            # MEXC returns `id: null` on this endpoint - confirmed against the
+            # live API - so there is nothing to deduplicate on. Polling every
+            # second then re-inserted the whole window: a 100s run produced
+            # 17,000 rows for a few hundred real trades.
+            #
+            # A synthetic key from the fields that identify a fill fixes that.
+            # It is prefixed so it can never be mistaken for an exchange id.
+            # The only collision case is two genuinely distinct fills sharing
+            # millisecond, price, size and side - and since this feed is
+            # already aggregated per 100ms bucket, such a pair would not be
+            # distinguishable as separate events anyway.
+            trade_id = e.get("id")
+            if trade_id is None and ts is not None:
+                trade_id = f"syn:{ts}:{price}:{qty}:{side}"
+
             out.append(
                 TradeUpdate(
                     symbol=sym.native,
-                    price=str(e.get("price")),
-                    qty=str(e.get("qty")),
-                    # The REST response carries an `id`, but it is routinely
-                    # null on MEXC, so it cannot be relied on for dedupe.
-                    trade_id=str(e["id"]) if e.get("id") is not None else None,
-                    ts_exchange=e.get("time"),
-                    side=SELL if buyer_is_maker else BUY,
+                    price=price,
+                    qty=qty,
+                    trade_id=str(trade_id) if trade_id is not None else None,
+                    ts_exchange=ts,
+                    side=side,
                     raw_side=f"isBuyerMaker={buyer_is_maker}",
                 )
             )

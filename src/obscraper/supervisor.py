@@ -299,6 +299,8 @@ class ExchangeSupervisor:
 
     async def _staleness_watchdog(self) -> None:
         threshold = self.app.connection.stale_after_s
+        trade_threshold = self.app.connection.trade_silence_warn_s
+        warned_trades = False
         while True:
             await asyncio.sleep(threshold / 2)
             staleness = self.adapter.staleness()
@@ -310,6 +312,33 @@ class ExchangeSupervisor:
                 )
                 self.writer.submit_event(self.adapter.name, "stale_forced_reconnect")
                 raise RuntimeError("stale connection")
+
+            # Trade channels get a different rule. An idle pair legitimately
+            # goes minutes without a trade, so recent silence proves nothing -
+            # but a connection that has been up a long time and seen *zero*
+            # trades while the book flows points at a rejected subscription.
+            # Deliberately a warning, not a reconnect: reconnecting cannot fix
+            # a channel the exchange refuses, it would just churn.
+            if (
+                not warned_trades
+                and trade_threshold > 0
+                and self.adapter.collect_trades
+                and self.adapter.trades_this_connection == 0
+                and self.adapter.connected
+                and time.monotonic() - self.adapter.connected_since > trade_threshold
+            ):
+                warned_trades = True
+                log.warning(
+                    "%s: connected for %.0fs with book data flowing but not a "
+                    "single trade - is the trade subscription being refused?",
+                    self.adapter.name,
+                    trade_threshold,
+                )
+                self.writer.submit_event(
+                    self.adapter.name,
+                    "no_trades_since_connect",
+                    detail=f"{trade_threshold:.0f}s without any trade",
+                )
 
     # -- REST path ---------------------------------------------------------
 
