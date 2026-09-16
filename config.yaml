@@ -11,7 +11,7 @@ general:
   # grid gives rows that are time-aligned across exchanges, so ts_grid is a
   # direct join key. stream keeps the exact arrival time of every update but
   # needs resampling before exchanges can be compared.
-  mode: grid
+  mode: stream
 
   # Record executed trades (the tape) as well. Independent of `mode`: a trade
   # is an event that either happened or did not, so there is no grid concept -
